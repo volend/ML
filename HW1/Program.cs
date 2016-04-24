@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
@@ -24,33 +25,44 @@ namespace HW1
             string fullFilePath = args.Length == 0 ? $@"..\..\Resources\{defaultName}" : args[0];
 
             List<Element> elements;
-            Dictionary<string, Header> headers;
-            ParseDataFile(File.ReadLines(fullFilePath), new Regex(H_PATTERN), new Regex(V_PATTERN), SplitArgs, out headers, out elements);
-
+            List<Header> headers;
+            ParseDataFile(File.ReadLines(fullFilePath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out headers, out elements);
             Parallel.ForEach(headers, hdr => AssignProbabilities(hdr, elements));
+
             TimeSpan startTime = DateTime.Now - start;
             Console.WriteLine(startTime.TotalMilliseconds);
+
+            start = DateTime.Now;
+            var tree = new DecisionTree(headers, elements);
+
+            startTime = DateTime.Now - start;
+            Console.WriteLine(startTime.TotalMilliseconds);
+        }
+
+        static Regex GetRegex(string pattern)
+        {
+            return new Regex(pattern, RegexOptions.Singleline | RegexOptions.Compiled);
         }
 
         // This method is called by multiple threads to modify the same list of elements, which is not synchronized
         // however, the it is thread safe due to mutation slicing: each invocation will modify exactly one index of the values
-        static void AssignProbabilities(KeyValuePair<string, Header> header, List<Element> elements)
+        static void AssignProbabilities(Header header, List<Element> elements)
         {
             var counts = new Dictionary<string /*value*/, double /*count*/>();
-            Array.ForEach(header.Value.Values, val => counts.Add(val, 0));
+            Array.ForEach(header.Values, str => counts.Add(str, 0));
             foreach (var element in elements)
             {
                 double count;
-                if (counts.TryGetValue(element[header.Value], out count))
-                    counts[element[header.Value]] = count + 1;
+                if (counts.TryGetValue(element[header], out count))
+                    counts[element[header]] = count + 1;
             }
 
             var picker = new ProbabilityPicker(ConvertToProbabilities(counts));
 
             foreach (var element in elements)
             {
-                if (!counts.ContainsKey(element[header.Value]))
-                    element[header.Value.Index] = picker.Pick();
+                if (!counts.ContainsKey(element[header]))
+                    element[header] = picker.Pick();
             }
         }
 
@@ -62,9 +74,9 @@ namespace HW1
         }
 
         static void ParseDataFile(IEnumerable<string> lines, Regex hRegex, Regex vRegex, string[] splitOptions,
-            out Dictionary<string, Header> headers, out List<Element> elements)
+            out List<Header> headers, out List<Element> elements)
         {
-            headers = new Dictionary<string, Header>();
+            headers = new List<Header>();
             elements = new List<Element>();
             bool headerSection = true;
             foreach (var line in lines)
@@ -90,7 +102,7 @@ namespace HW1
             elements.Add(new Element(values, positive));
         }
 
-        static void ParseHeader(Regex hRegex, Regex vRegex, string[] splitOptions, Dictionary<string, Header> headers, string line)
+        static void ParseHeader(Regex hRegex, Regex vRegex, string[] splitOptions, List<Header> headers, string line)
         {
             if (!line.StartsWith(HEADER)) return;
 
@@ -102,10 +114,100 @@ namespace HW1
 
             string name = hdr.Value;
             string[] values = val.Value.Split(splitOptions, StringSplitOptions.RemoveEmptyEntries);
-            headers.Add(name, new Header(headers.Count, name, values));
+            headers.Add(new Header(headers.Count, name, values));
         }
     }
 
+    public class TreeNode
+    {
+        readonly List<TreeNode> children;
+        readonly Header attribute;
+        public TreeNode(Header attribute)
+        {
+            this.attribute = attribute;
+            children = new List<TreeNode>(attribute.Values.Length);
+            foreach (var value in attribute.Values)
+            {
+                children.Add(null);
+            }
+        }
+    }
+
+    public class DecisionTree
+    {
+        readonly List<Element> samples;
+        readonly List<Header> headers;
+
+        public DecisionTree(List<Header> headers, List<Element> samples)
+        {
+            this.headers = headers;
+            this.samples = samples;
+        }
+
+        public void BuildTree()
+        {
+            Header bestHeader = GetBestHeader(samples, headers);
+        }
+
+        Header GetBestHeader(List<Element> sampleSet, List<Header> headerSet)
+        {
+            Header bestHeader = null;
+            double highestGain = 0.0d;
+
+            Parallel.ForEach(headerSet, header =>
+            {
+                double gain = CalculateGain(sampleSet, header);
+                lock (headerSet)
+                {
+                    if (gain > highestGain)
+                    {
+                        highestGain = gain;
+                        bestHeader = header;
+                    }
+                }
+            });
+
+            return bestHeader;
+        }
+
+        double CalculateEntropy(List<Element> sampleSet)
+        {
+            int positives = CountPositiveExamples(sampleSet);
+            return CalculateEntropy(positives, sampleSet.Count - positives);
+        }
+
+        double CalculateEntropy(int positives, int negatives)
+        {
+            double total = positives + negatives;
+
+            double positiveProbability = positives / total;
+            double negativeProbability = negatives / total;
+
+            positiveProbability = -positiveProbability * Math.Log(positiveProbability, 2);
+            negativeProbability = -negativeProbability * Math.Log(negativeProbability, 2);
+
+            return positiveProbability + negativeProbability;
+        }
+
+        int CountPositiveExamples(IEnumerable<Element> sampleSet) => sampleSet.Count(positive => positive);
+
+        double CalculateGain(List<Element> samplesSet, Header header)
+        {
+            int positives = CountPositiveExamples(samplesSet);
+            double entropyBefore = CalculateEntropy(positives, samplesSet.Count - positives);
+
+            double entropyAfter = 0.0d;
+            foreach (var group in samplesSet.GroupBy(sample => sample[header]))
+            {
+                int groupPositives = CountPositiveExamples(group);
+                int groupTotals = group.Count();
+                entropyAfter += CalculateEntropy(groupPositives, group.Count()) * groupTotals / samplesSet.Count;
+            }
+
+            Debug.Assert(entropyAfter <= entropyBefore);
+            return entropyBefore - entropyAfter;
+        }
+    }
 
     public class ProbabilityPicker
     {
@@ -167,7 +269,11 @@ namespace HW1
             }
         }
 
-        public string this[Header attr] => this[attr.Index];
+        public string this[Header attr]
+        {
+            get { return this[attr.Index]; }
+            set { this[attr.Index] = value; }
+        }
     }
 
     public class Header
