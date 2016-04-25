@@ -1,11 +1,16 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
+using System.Security.Policy;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Accord.Statistics.Kernels;
+using Accord.Statistics.Testing;
 
 namespace HW1
 {
@@ -20,23 +25,64 @@ namespace HW1
 
         static void Main(string[] args)
         {
-            DateTime start = DateTime.Now;
-            const string defaultName = "training_subsetD.arff";
-            string fullFilePath = args.Length == 0 ? $@"..\..\Resources\{defaultName}" : args[0];
+            const string trainingSetFile = "training_subsetD.arff";
+            const string testSet = "testingD.arff";
+            string trainingSetPath = args.Length == 0 ? $@"..\..\Resources\{trainingSetFile}" : args[0];
+            string testSetPath = args.Length == 0 ? $@"..\..\Resources\{testSet}" : args[0];
 
-            List<Element> elements;
-            List<Header> headers;
-            ParseDataFile(File.ReadLines(fullFilePath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out headers, out elements);
-            Parallel.ForEach(headers, hdr => AssignProbabilities(hdr, elements));
+            List<Record> trainingSet;
+            List<DiscreteAttribute> attributes;
+            ParseDataFile(File.ReadLines(trainingSetPath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes, out trainingSet);
+            attributes = attributes.Except(new[] { attributes.Last() }).ToList();
 
-            TimeSpan startTime = DateTime.Now - start;
-            Console.WriteLine(startTime.TotalMilliseconds);
+            AssignProbabilitiesByClass(trainingSet, attributes);
 
-            start = DateTime.Now;
-            var tree = new DecisionTree(headers, elements);
+            List<Record> validationSet = PullValidationSet(trainingSet, percent: 0.10d);
+            Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, validationSet));
 
-            startTime = DateTime.Now - start;
-            Console.WriteLine(startTime.TotalMilliseconds);
+            DecisionTree tree = new DecisionTree(attributes, trainingSet);
+            tree.Build(90);
+            double error = PercentError(validationSet, tree);
+            Console.WriteLine($"Tree.Size({tree.Size()}) with Precision = {90} has errorRate={error}");
+
+            //for (int i = 90; i > 50; i--)
+            //{
+            //    tree.Build(i);
+            //    double error = PercentError(validationSet, tree);
+            //    Console.WriteLine($"Tree.Size({tree.Size()}) with Precision = {i} has errorRate={error}");
+            //}
+        }
+
+        static void AssignProbabilitiesByClass(List<Record> trainingSet, List<DiscreteAttribute> attributes)
+        {
+            var groups = trainingSet.GroupBy(elem => elem.IsPositive);
+            foreach (var group in groups)
+                Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, @group.ToList()));
+            Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
+        }
+
+        static double PercentError(List<Record> validationSet, DecisionTree tree)
+        {
+            double positive = validationSet.Count(record => record.IsPositive);
+            double predictedPositive = validationSet.AsParallel().Count(tree.Test);
+
+            return Math.Abs(predictedPositive - positive) / positive * 100;
+        }
+
+        static List<Record> PullValidationSet(List<Record> trainingSet, double percent)
+        {
+            var validationSet = new List<Record>();
+            Random rand = new Random();
+            for (int i = trainingSet.Count - 1; i >= 0; i--)
+            {
+                if (rand.NextDouble() <= percent)
+                {
+                    validationSet.Add(trainingSet[i]);
+                    trainingSet.RemoveAt(i);
+                }
+            }
+
+            return validationSet;
         }
 
         static Regex GetRegex(string pattern)
@@ -46,23 +92,23 @@ namespace HW1
 
         // This method is called by multiple threads to modify the same list of elements, which is not synchronized
         // however, the it is thread safe due to mutation slicing: each invocation will modify exactly one index of the values
-        static void AssignProbabilities(Header header, List<Element> elements)
+        static void AssignProbabilities(DiscreteAttribute discreteAttribute, List<Record> elements)
         {
             var counts = new Dictionary<string /*value*/, double /*count*/>();
-            Array.ForEach(header.Values, str => counts.Add(str, 0));
+            Array.ForEach(discreteAttribute.Values, str => counts.Add(str, 0));
             foreach (var element in elements)
             {
                 double count;
-                if (counts.TryGetValue(element[header], out count))
-                    counts[element[header]] = count + 1;
+                if (counts.TryGetValue(element[discreteAttribute], out count))
+                    counts[element[discreteAttribute]] = count + 1;
             }
 
             var picker = new ProbabilityPicker(ConvertToProbabilities(counts));
 
             foreach (var element in elements)
             {
-                if (!counts.ContainsKey(element[header]))
-                    element[header] = picker.Pick();
+                if (!counts.ContainsKey(element[discreteAttribute]))
+                    element[discreteAttribute] = picker.Pick();
             }
         }
 
@@ -74,10 +120,10 @@ namespace HW1
         }
 
         static void ParseDataFile(IEnumerable<string> lines, Regex hRegex, Regex vRegex, string[] splitOptions,
-            out List<Header> headers, out List<Element> elements)
+            out List<DiscreteAttribute> headers, out List<Record> elements)
         {
-            headers = new List<Header>();
-            elements = new List<Element>();
+            headers = new List<DiscreteAttribute>();
+            elements = new List<Record>();
             bool headerSection = true;
             foreach (var line in lines)
             {
@@ -90,19 +136,19 @@ namespace HW1
                 if (headerSection)
                     ParseHeader(hRegex, vRegex, splitOptions, headers, line);
                 else
-                    ParseElement(splitOptions, elements, line);
+                    ParseRecord(splitOptions, elements, line);
             }
         }
 
-        static void ParseElement(string[] splitOptions, List<Element> elements, string line)
+        static void ParseRecord(string[] splitOptions, List<Record> elements, string line)
         {
             string[] values = line.Split(splitOptions, StringSplitOptions.RemoveEmptyEntries);
             if (!values.Any()) return;
             bool positive = bool.Parse(values[values.Length - 1]);
-            elements.Add(new Element(values, positive));
+            elements.Add(new Record(values, positive));
         }
 
-        static void ParseHeader(Regex hRegex, Regex vRegex, string[] splitOptions, List<Header> headers, string line)
+        static void ParseHeader(Regex hRegex, Regex vRegex, string[] splitOptions, List<DiscreteAttribute> headers, string line)
         {
             if (!line.StartsWith(HEADER)) return;
 
@@ -114,97 +160,183 @@ namespace HW1
 
             string name = hdr.Value;
             string[] values = val.Value.Split(splitOptions, StringSplitOptions.RemoveEmptyEntries);
-            headers.Add(new Header(headers.Count, name, values));
+            headers.Add(new DiscreteAttribute(headers.Count, name, values));
         }
     }
 
     public class TreeNode
     {
-        readonly List<TreeNode> children;
-        readonly Header attribute;
-        public TreeNode(Header attribute)
+        readonly Dictionary<string/*value*/, TreeNode> children;
+        readonly DiscreteAttribute attribute;
+        Func<bool> decision;
+        double percentAccuracy;
+        string label;
+
+        public TreeNode(string value, List<DiscreteAttribute> attributes, List<Record> records, double desiredAccuracy)
         {
-            this.attribute = attribute;
-            children = new List<TreeNode>(attribute.Values.Length);
-            foreach (var value in attribute.Values)
-            {
-                children.Add(null);
-            }
+            Value = value;
+            children = new Dictionary<string, TreeNode>();
+
+            if (DecideTrue(records)) return;
+            if (DecideFalse(records)) return;
+            DecideByMajority(records);
+            if (percentAccuracy >= desiredAccuracy)
+                return;
+            attribute = DecisionTree.GetBestHeader(records, attributes);
+            if (!CheckBestAttribute(records))
+                CreateBranches(attributes, records, desiredAccuracy);
+
         }
+
+        public void Print()
+        {
+            Console.WriteLine($"{label}");
+            foreach (TreeNode childNode in children.Values)
+                childNode.Print();
+        }
+
+        public string Label => label;
+        public string Value { get; }
+
+        public bool Test(Record record)
+        {
+            if (attribute == null)
+                return decision();
+
+            TreeNode nextNode;
+            return children.TryGetValue(record[attribute], out nextNode) ? nextNode.Test(record) : decision();
+        }
+
+        void CreateBranches(List<DiscreteAttribute> attributes, List<Record> records, double desiredAccuracy)
+        {
+            if (percentAccuracy >= desiredAccuracy) return;
+
+            label += $@"=> Attribute={attribute.Name}";
+            var groups = records.GroupBy(record => record[attribute]);
+            Parallel.ForEach(groups, group =>
+            {
+                lock (children)
+                    children.Add(group.Key, new TreeNode(group.Key, attributes.Except(new[] { attribute }).ToList(),
+                                                         group.ToList(), desiredAccuracy));
+            });
+        }
+
+        bool CheckBestAttribute(List<Record> records)
+        {
+            if (attribute != null) return false;
+
+            label = decision() ? bool.TrueString : bool.FalseString;
+            return true;
+        }
+
+        void DecideByMajority(List<Record> records)
+        {
+            double positive = records.Count(record => record);
+            percentAccuracy = 100 * positive / records.Count;
+            decision = () => percentAccuracy > 50;
+        }
+
+        bool DecideFalse(List<Record> records)
+        {
+            if (records.TrueForAll(record => !record.IsPositive))
+            {
+                percentAccuracy = 100;
+                decision = () => false;
+                label = bool.FalseString;
+                return true;
+            }
+            return false;
+        }
+
+        bool DecideTrue(List<Record> records)
+        {
+            if (records.TrueForAll(record => record.IsPositive))
+            {
+                percentAccuracy = 100;
+                decision = () => true;
+                label = bool.TrueString;
+                return true;
+            }
+            return false;
+        }
+
+        public int Size() => 1 + children.Values.Sum(child => child.Size());
     }
 
     public class DecisionTree
     {
-        readonly List<Element> samples;
-        readonly List<Header> headers;
+        readonly List<Record> records;
+        readonly List<DiscreteAttribute> attributes;
+        TreeNode root;
 
-        public DecisionTree(List<Header> headers, List<Element> samples)
+        public DecisionTree(List<DiscreteAttribute> attributes, List<Record> records)
         {
-            this.headers = headers;
-            this.samples = samples;
+            this.attributes = attributes;
+            this.records = records;
         }
 
-        public void BuildTree()
+        public void Build(double desiredCertainty)
         {
-            Header bestHeader = GetBestHeader(samples, headers);
+            root = new TreeNode("root", attributes, records, desiredCertainty);
         }
 
-        Header GetBestHeader(List<Element> sampleSet, List<Header> headerSet)
-        {
-            Header bestHeader = null;
-            double highestGain = 0.0d;
+        public bool Test(Record record) => root.Test(record);
 
-            Parallel.ForEach(headerSet, header =>
+        public void Print() => root.Print();
+
+        public int Size() => root.Size();
+
+        public static DiscreteAttribute GetBestHeader(List<Record> recordsSet, List<DiscreteAttribute> headersSet)
+        {
+            if (!headersSet.Any()) return null;
+
+            var gains = new ConcurrentDictionary<double/*gain*/, DiscreteAttribute>();
+            Parallel.ForEach(headersSet, header =>
             {
-                double gain = CalculateGain(sampleSet, header);
-                lock (headerSet)
+                double gain = CalculateGain(recordsSet, header);
+                lock (gains)
                 {
-                    if (gain > highestGain)
-                    {
-                        highestGain = gain;
-                        bestHeader = header;
-                    }
+                    gains.TryAdd(gain, header);
                 }
             });
 
-            return bestHeader;
+            return gains[gains.Keys.Max()];
         }
 
-        double CalculateEntropy(List<Element> sampleSet)
+        public static double CalculateEntropy(List<Record> sampleSet)
         {
             int positives = CountPositiveExamples(sampleSet);
             return CalculateEntropy(positives, sampleSet.Count - positives);
         }
 
-        double CalculateEntropy(int positives, int negatives)
+        static double CalculateEntropy(int positives, int negatives)
         {
             double total = positives + negatives;
-
-            double positiveProbability = positives / total;
-            double negativeProbability = negatives / total;
-
-            positiveProbability = -positiveProbability * Math.Log(positiveProbability, 2);
-            negativeProbability = -negativeProbability * Math.Log(negativeProbability, 2);
-
-            return positiveProbability + negativeProbability;
+            return CalcPartEntropy(positives, total) + CalcPartEntropy(negatives, total);
         }
 
-        int CountPositiveExamples(IEnumerable<Element> sampleSet) => sampleSet.Count(positive => positive);
+        static double CalcPartEntropy(int part, double total)
+        {
+            if (part == 0) return 0; // According to .NET CLR: -Infinity * 0 = NaN
+            double partProbability = part / total;
+            return -partProbability * Math.Log(partProbability, 2);
+        }
 
-        double CalculateGain(List<Element> samplesSet, Header header)
+        static int CountPositiveExamples(IEnumerable<Record> sampleSet) => sampleSet.Count(positive => positive);
+
+        static double CalculateGain(List<Record> samplesSet, DiscreteAttribute discreteAttribute)
         {
             int positives = CountPositiveExamples(samplesSet);
             double entropyBefore = CalculateEntropy(positives, samplesSet.Count - positives);
 
             double entropyAfter = 0.0d;
-            foreach (var group in samplesSet.GroupBy(sample => sample[header]))
+            foreach (var group in samplesSet.GroupBy(sample => sample[discreteAttribute]))
             {
-                int groupPositives = CountPositiveExamples(group);
                 int groupTotals = group.Count();
-                entropyAfter += CalculateEntropy(groupPositives, group.Count()) * groupTotals / samplesSet.Count;
+                int groupPositives = CountPositiveExamples(group);
+                entropyAfter += CalculateEntropy(groupPositives, groupTotals - groupPositives) * groupTotals / samplesSet.Count;
             }
 
-            Debug.Assert(entropyAfter <= entropyBefore);
             return entropyBefore - entropyAfter;
         }
     }
@@ -238,11 +370,11 @@ namespace HW1
         }
     }
 
-    public class Element
+    public class Record
     {
         readonly string[] values;
 
-        public Element(string[] values, bool positive)
+        public Record(string[] values, bool positive)
         {
             Contract.Requires(values != null && values.Length > 0);
             this.values = values;
@@ -251,7 +383,7 @@ namespace HW1
 
         public bool IsPositive { get; }
 
-        public static implicit operator bool(Element e) => e.IsPositive;
+        public static implicit operator bool(Record e) => e.IsPositive;
 
         public string this[int index]
         {
@@ -269,20 +401,20 @@ namespace HW1
             }
         }
 
-        public string this[Header attr]
+        public string this[DiscreteAttribute attr]
         {
             get { return this[attr.Index]; }
             set { this[attr.Index] = value; }
         }
     }
 
-    public class Header
+    public class DiscreteAttribute
     {
         public int Index { get; }
         public string Name { get; }
         public string[] Values { get; }
 
-        public Header(int index, string name, string[] values)
+        public DiscreteAttribute(int index, string name, string[] values)
         {
             Contract.Requires(name != null);
             Contract.Requires(values != null);
