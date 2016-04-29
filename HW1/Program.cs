@@ -1,15 +1,11 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
-using System.Security.Policy;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Accord.Statistics.Kernels;
 using Accord.Statistics.Testing;
 
 namespace HW1
@@ -26,63 +22,67 @@ namespace HW1
         static void Main(string[] args)
         {
             const string trainingSetFile = "training_subsetD.arff";
-            const string testSet = "testingD.arff";
-            string trainingSetPath = args.Length == 0 ? $@"..\..\Resources\{trainingSetFile}" : args[0];
-            string testSetPath = args.Length == 0 ? $@"..\..\Resources\{testSet}" : args[0];
+            const string testSetFile = "testingD.arff";
+            string folder = args.Length != 1 ? @"..\..\Resources\" : args[0];
 
-            List<Record> trainingSet;
+            string trainingSetPath = Path.Combine(folder, trainingSetFile);
+            string testSetPath = Path.Combine(folder, testSetFile);
+
+            //Extract training set
             List<DiscreteAttribute> attributes;
-            ParseDataFile(File.ReadLines(trainingSetPath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes, out trainingSet);
-            attributes = attributes.Except(new[] { attributes.Last() }).ToList();
-
+            List<Record> trainingSet = RandomizeDataSet(ExtractDataSet(trainingSetPath, out attributes));
+            // Assign missing attributes by probabilities by class
             AssignProbabilitiesByClass(trainingSet, attributes);
 
-            List<Record> validationSet = PullValidationSet(trainingSet, percent: 0.10d);
-            Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, validationSet));
+            List<DiscreteAttribute> testAttributes;
+            List<Record> testSet = RandomizeDataSet(ExtractDataSet(testSetPath, out testAttributes));
+            // Assign missing attributes by probabilities (Note: we are not using probabilities by class, as the aim is to predict the class)
+            Parallel.ForEach(testAttributes, hdr => AssignProbabilities(hdr, testSet));
 
-            DecisionTree tree = new DecisionTree(attributes, trainingSet);
-            tree.Build(90);
-            double error = PercentError(validationSet, tree);
-            Console.WriteLine($"Tree.Size({tree.Size()}) with Precision = {90} has errorRate={error}");
+            DecisionTree dTree = new DecisionTree(attributes, trainingSet);
+            double[] fracCertainties = { 0.99d, 0.95d, 0.90d, 0.80d, 0 };
+            foreach (var fracCertainty in fracCertainties)
+            {
+                dTree.Build(fracCertainty);
+                double predictionAccuracy = CalculateAccuracy(testSet, dTree);
+                double sanityCheckAccuracy = CalculateAccuracy(trainingSet, dTree); // Perform sanity check by validating the training set
+                Console.WriteLine($"Prediction% / Sanity% = {predictionAccuracy}% / {sanityCheckAccuracy}% " +
+                                  $"with DOC={fracCertainty} " +
+                                  $"and ID3.size={dTree.Size()} " +
+                                  $"and ID3.depth={dTree.Depth()}");
+            }
+        }
 
-            //for (int i = 90; i > 50; i--)
-            //{
-            //    tree.Build(i);
-            //    double error = PercentError(validationSet, tree);
-            //    Console.WriteLine($"Tree.Size({tree.Size()}) with Precision = {i} has errorRate={error}");
-            //}
+        static List<Record> RandomizeDataSet(List<Record> trainingSet)
+        {
+            Random rand = new Random(); // Uses Environment.Tickcount which is effectively a random seed
+            trainingSet = trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
+            return trainingSet;
+        }
+
+        static List<Record> ExtractDataSet(string dataSetPath, out List<DiscreteAttribute> attributes)
+        {
+            List<Record> trainingSet;
+            ParseDataFile(File.ReadLines(dataSetPath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes,
+                out trainingSet);
+            attributes = attributes.Except(new[] { attributes.Last() }).ToList(); // Remove the boolean column
+            return trainingSet;
         }
 
         static void AssignProbabilitiesByClass(List<Record> trainingSet, List<DiscreteAttribute> attributes)
         {
             var groups = trainingSet.GroupBy(elem => elem.IsPositive);
             foreach (var group in groups)
-                Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, @group.ToList()));
-            Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
+                Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, group.ToList()));
+            //Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
         }
 
-        static double PercentError(List<Record> validationSet, DecisionTree tree)
+        static double CalculateAccuracy(List<Record> validationSet, DecisionTree tree)
         {
             double positive = validationSet.Count(record => record.IsPositive);
             double predictedPositive = validationSet.AsParallel().Count(tree.Test);
 
-            return Math.Abs(predictedPositive - positive) / positive * 100;
-        }
-
-        static List<Record> PullValidationSet(List<Record> trainingSet, double percent)
-        {
-            var validationSet = new List<Record>();
-            Random rand = new Random();
-            for (int i = trainingSet.Count - 1; i >= 0; i--)
-            {
-                if (rand.NextDouble() <= percent)
-                {
-                    validationSet.Add(trainingSet[i]);
-                    trainingSet.RemoveAt(i);
-                }
-            }
-
-            return validationSet;
+            return 100 - Math.Abs(predictedPositive - positive) / positive * 100;
         }
 
         static Regex GetRegex(string pattern)
@@ -109,6 +109,7 @@ namespace HW1
             {
                 if (!counts.ContainsKey(element[discreteAttribute]))
                     element[discreteAttribute] = picker.Pick();
+                //element[discreteAttribute] = picker.PickMax();
             }
         }
 
@@ -169,80 +170,90 @@ namespace HW1
         readonly Dictionary<string/*value*/, TreeNode> children;
         readonly DiscreteAttribute attribute;
         Func<bool> decision;
-        double percentAccuracy;
-        string label;
 
-        public TreeNode(string value, List<DiscreteAttribute> attributes, List<Record> records, double desiredAccuracy)
+        public TreeNode(string value, List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
             Value = value;
             children = new Dictionary<string, TreeNode>();
-
             if (DecideTrue(records)) return;
             if (DecideFalse(records)) return;
-            DecideByMajority(records);
-            if (percentAccuracy >= desiredAccuracy)
-                return;
-            attribute = DecisionTree.GetBestHeader(records, attributes);
-            if (!CheckBestAttribute(records))
-                CreateBranches(attributes, records, desiredAccuracy);
 
+            DecideByMajority(records);
+
+            attribute = DecisionTree.GetBestHeader(records, attributes);
+            if (!IsLeafNode())
+                BuildChildNodes(attributes, records, fracCertainty);
         }
 
         public void Print()
         {
-            Console.WriteLine($"{label}");
+            Console.WriteLine($"{Label}");
             foreach (TreeNode childNode in children.Values)
                 childNode.Print();
         }
 
-        public string Label => label;
+        public string Label { get; set; }
+
         public string Value { get; }
 
-        public bool Test(Record record)
+        public bool Test(Record instance)
         {
             if (attribute == null)
                 return decision();
 
             TreeNode nextNode;
-            return children.TryGetValue(record[attribute], out nextNode) ? nextNode.Test(record) : decision();
+            return children.TryGetValue(instance[attribute], out nextNode) ? nextNode.Test(instance) : decision();
         }
 
-        void CreateBranches(List<DiscreteAttribute> attributes, List<Record> records, double desiredAccuracy)
+        void BuildChildNodes(List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
-            if (percentAccuracy >= desiredAccuracy) return;
+            Label += $@"=> Attribute={attribute.Name}";
+            var groups = records.GroupBy(record => record[attribute]).ToList();
 
-            label += $@"=> Attribute={attribute.Name}";
-            var groups = records.GroupBy(record => record[attribute]);
+            ChiSquareTest chiSquare = CalculateChiSquare(records.Count(rec => rec), records.Count, groups);
+            chiSquare.Size = 1 - fracCertainty;
+
+            if (!chiSquare.Significant) return;
+
             Parallel.ForEach(groups, group =>
             {
                 lock (children)
                     children.Add(group.Key, new TreeNode(group.Key, attributes.Except(new[] { attribute }).ToList(),
-                                                         group.ToList(), desiredAccuracy));
+                                                         group.ToList(), fracCertainty));
             });
         }
 
-        bool CheckBestAttribute(List<Record> records)
+        ChiSquareTest CalculateChiSquare(int positive, int total, List<IGrouping<string, Record>> groups)
         {
-            if (attribute != null) return false;
+            var pExpected = new double[groups.Count * 2];
+            var pObserved = new double[groups.Count * 2];
 
-            label = decision() ? bool.TrueString : bool.FalseString;
-            return true;
+            for (int i = 0; i < groups.Count; i++)
+            {
+                pExpected[i * 2] = (double)positive * groups[i].Count() / total;
+                pExpected[i * 2 + 1] = (double)(total - positive) * groups[i].Count() / total;
+                pObserved[i * 2] = groups[i].Count(record => record);
+                pObserved[i * 2 + 1] = groups[i].Count(record => !record);
+            }
+
+            return new ChiSquareTest(pExpected, pObserved, groups.Count - 1);
         }
+
+        bool IsLeafNode() => attribute == null;
 
         void DecideByMajority(List<Record> records)
         {
             double positive = records.Count(record => record);
-            percentAccuracy = 100 * positive / records.Count;
-            decision = () => percentAccuracy > 50;
+            decision = () => 100 * positive / records.Count > 50;
+            Label = decision() ? bool.TrueString : bool.FalseString;
         }
 
         bool DecideFalse(List<Record> records)
         {
             if (records.TrueForAll(record => !record.IsPositive))
             {
-                percentAccuracy = 100;
                 decision = () => false;
-                label = bool.FalseString;
+                Label = bool.FalseString;
                 return true;
             }
             return false;
@@ -252,15 +263,19 @@ namespace HW1
         {
             if (records.TrueForAll(record => record.IsPositive))
             {
-                percentAccuracy = 100;
                 decision = () => true;
-                label = bool.TrueString;
+                Label = bool.TrueString;
                 return true;
             }
             return false;
         }
 
         public int Size() => 1 + children.Values.Sum(child => child.Size());
+
+        public int Depth()
+        {
+            return 1 + (children.Any() ? children.Values.Max(node => node.Depth()) : 0);
+        }
     }
 
     public class DecisionTree
@@ -275,16 +290,18 @@ namespace HW1
             this.records = records;
         }
 
-        public void Build(double desiredCertainty)
+        public void Build(double fracCertainty)
         {
-            root = new TreeNode("root", attributes, records, desiredCertainty);
+            root = new TreeNode("root", attributes, records, fracCertainty);
         }
 
-        public bool Test(Record record) => root.Test(record);
+        public bool Test(Record instance) => root.Test(instance);
 
         public void Print() => root.Print();
 
         public int Size() => root.Size();
+
+        public int Depth() => root.Depth();
 
         public static DiscreteAttribute GetBestHeader(List<Record> recordsSet, List<DiscreteAttribute> headersSet)
         {
@@ -368,6 +385,8 @@ namespace HW1
             }
             return result;
         }
+
+        public string PickMax() => probabilities.Aggregate((l, r) => l.Item2 > r.Item2 ? l : r).Item1;
     }
 
     public class Record
@@ -376,7 +395,6 @@ namespace HW1
 
         public Record(string[] values, bool positive)
         {
-            Contract.Requires(values != null && values.Length > 0);
             this.values = values;
             IsPositive = positive;
         }
@@ -389,14 +407,10 @@ namespace HW1
         {
             get
             {
-                Contract.Requires(index >= 0);
-                Contract.Requires(index < values.Length - 1);
                 return values[index];
             }
             set
             {
-                Contract.Requires(index >= 0);
-                Contract.Requires(index < values.Length - 1);
                 values[index] = value;
             }
         }
@@ -416,9 +430,6 @@ namespace HW1
 
         public DiscreteAttribute(int index, string name, string[] values)
         {
-            Contract.Requires(name != null);
-            Contract.Requires(values != null);
-
             Index = index;
             Name = name;
             Values = values;
