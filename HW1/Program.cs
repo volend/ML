@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
+using System.Security.AccessControl;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Accord.Statistics.Testing;
@@ -28,53 +30,105 @@ namespace HW1
             string trainingSetPath = Path.Combine(folder, trainingSetFile);
             string testSetPath = Path.Combine(folder, testSetFile);
 
+            string[] trainingData = File.ReadAllLines(trainingSetPath);
+            string[] testData = File.ReadAllLines(testSetPath);
+
+            double[] fracCertainties = { 0.99d, 0.95d, 0.90d, 0 };
+            var results = new Dictionary<double /*fracCertainty*/, List<Tuple<double /*accuracy*/, double /*sanity*/>>>();
+            for (int i = 0; i < 10; i++)
+            {
+                Console.WriteLine($"Test #{i}");
+                var testResults = PerformSingleTest(trainingData, testData, fracCertainties);
+                for (int index = 0; index < testResults.Length; index++)
+                {
+                    List<Tuple<double /*accuracy*/, double /*sanity*/>> value;
+                    if (!results.TryGetValue(fracCertainties[index], out value))
+                    {
+                        results[fracCertainties[index]] = value = new List<Tuple<double, double>>();
+                    }
+                    value.Add(testResults[index]);
+                }
+            }
+
+            foreach (var kvp in results)
+                Console.WriteLine($"DOC={kvp.Key}, AvgAccuracy={kvp.Value.Average(x => x.Item1)}, AvgSanity={kvp.Value.Average(x => x.Item2)}");
+        }
+
+        static Tuple<double/*accuracy*/, double/*sanity*/>[] PerformSingleTest(string[] trainingData, string[] testData, double[] fracCertainties)
+        {
+            Console.WriteLine($"{GetTimeStamp()} Loading training data...");
             //Extract training set
             List<DiscreteAttribute> attributes;
-            List<Record> trainingSet = RandomizeDataSet(ExtractDataSet(trainingSetPath, out attributes));
+            List<Record> trainingSet = RandomizeDataSet(ExtractDataSet(trainingData, out attributes));
+
+            //PrintStats(trainingSet, attributes);
             // Assign missing attributes by probabilities by class
-            AssignProbabilitiesByClass(trainingSet, attributes);
+            Console.WriteLine($"{GetTimeStamp()} Handle misisng attributes...");
+            DecisionTree.AssignProbabilitiesByClass(attributes, trainingSet);
 
+            Console.WriteLine($"{GetTimeStamp()} Loading test data...");
             List<DiscreteAttribute> testAttributes;
-            List<Record> testSet = RandomizeDataSet(ExtractDataSet(testSetPath, out testAttributes));
+            List<Record> testSet = RandomizeDataSet(ExtractDataSet(testData, out testAttributes));
             // Assign missing attributes by probabilities (Note: we are not using probabilities by class, as the aim is to predict the class)
-            Parallel.ForEach(testAttributes, hdr => AssignProbabilities(hdr, testSet));
+            Console.WriteLine($"{GetTimeStamp()} Handle misisng attributes...");
+            Parallel.ForEach(testAttributes, attribute => DecisionTree.AssignProbabilities(attribute, testSet));
 
+            var accuracyStats = new Tuple<double, double>[fracCertainties.Length];
             DecisionTree dTree = new DecisionTree(attributes, trainingSet);
-            double[] fracCertainties = { 0.99d, 0.95d, 0.90d, 0.80d, 0 };
-            foreach (var fracCertainty in fracCertainties)
+            for (int index = 0; index < fracCertainties.Length; index++)
             {
+                var fracCertainty = fracCertainties[index];
+                Console.WriteLine($"{GetTimeStamp()} Building decision tree...");
                 dTree.Build(fracCertainty);
                 double predictionAccuracy = CalculateAccuracy(testSet, dTree);
-                double sanityCheckAccuracy = CalculateAccuracy(trainingSet, dTree); // Perform sanity check by validating the training set
-                Console.WriteLine($"Prediction% / Sanity% = {predictionAccuracy}% / {sanityCheckAccuracy}% " +
-                                  $"with DOC={fracCertainty} " +
-                                  $"and ID3.size={dTree.Size()} " +
-                                  $"and ID3.depth={dTree.Depth()}");
+                double sanityCheckAccuracy = CalculateAccuracy(trainingSet, dTree);
+                accuracyStats[index] = new Tuple<double, double>(predictionAccuracy, sanityCheckAccuracy);
+                // Perform sanity check by validating the training set
+                Console.WriteLine(
+                    $"{GetTimeStamp()} Prediction% / Sanity% = {predictionAccuracy}% / {sanityCheckAccuracy}% " +
+                    $"with DOC={fracCertainty} " +
+                    $"and ID3.size={dTree.Size()} " +
+                    $"and ID3.depth={dTree.Depth()}");
             }
+
+            return accuracyStats;
+        }
+
+        [SuppressMessage("ReSharper", "UnusedMember.Local")]
+        static void PrintStats(List<Record> trainingSet, List<DiscreteAttribute> attributes)
+        {
+            int counter = 0;
+            foreach (var attribute in attributes.OrderByDescending(attr => attr.Values.Length))
+            {
+                var groups = trainingSet.GroupBy(x => x[attribute]);
+                Console.WriteLine($"[{counter++}]Attribute={attribute.Name}, Count={attribute.Values.Length}");
+                foreach (var group in groups)
+                    Console.Write($"[Count={group.Count()}] ");
+                Console.WriteLine();
+            }
+        }
+
+        static string GetTimeStamp()
+        {
+            return $"[{DateTime.Now.ToString("HH:mm:ss.fff")}]";
         }
 
         static List<Record> RandomizeDataSet(List<Record> trainingSet)
         {
             Random rand = new Random(); // Uses Environment.Tickcount which is effectively a random seed
-            trainingSet = trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
+            //trainingSet = trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
             return trainingSet;
         }
 
-        static List<Record> ExtractDataSet(string dataSetPath, out List<DiscreteAttribute> attributes)
+        static List<Record> ExtractDataSet(IEnumerable<string> textLines, out List<DiscreteAttribute> attributes)
         {
             List<Record> trainingSet;
-            ParseDataFile(File.ReadLines(dataSetPath), GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes,
+            ParseDataFile(textLines, GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes,
                 out trainingSet);
             attributes = attributes.Except(new[] { attributes.Last() }).ToList(); // Remove the boolean column
+            //foreach (var attribute in attributes)
+            //    attribute.Values = new List<string>(attribute.Values) { "?" }.ToArray();
             return trainingSet;
-        }
-
-        static void AssignProbabilitiesByClass(List<Record> trainingSet, List<DiscreteAttribute> attributes)
-        {
-            var groups = trainingSet.GroupBy(elem => elem.IsPositive);
-            foreach (var group in groups)
-                Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, group.ToList()));
-            //Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
         }
 
         static double CalculateAccuracy(List<Record> validationSet, DecisionTree tree)
@@ -82,42 +136,12 @@ namespace HW1
             double positive = validationSet.Count(record => record.IsPositive);
             double predictedPositive = validationSet.AsParallel().Count(tree.Test);
 
-            return 100 - Math.Abs(predictedPositive - positive) / positive * 100;
+            return Math.Round(100 - Math.Abs(predictedPositive - positive) / positive * 100);
         }
 
         static Regex GetRegex(string pattern)
         {
             return new Regex(pattern, RegexOptions.Singleline | RegexOptions.Compiled);
-        }
-
-        // This method is called by multiple threads to modify the same list of elements, which is not synchronized
-        // however, the it is thread safe due to mutation slicing: each invocation will modify exactly one index of the values
-        static void AssignProbabilities(DiscreteAttribute discreteAttribute, List<Record> elements)
-        {
-            var counts = new Dictionary<string /*value*/, double /*count*/>();
-            Array.ForEach(discreteAttribute.Values, str => counts.Add(str, 0));
-            foreach (var element in elements)
-            {
-                double count;
-                if (counts.TryGetValue(element[discreteAttribute], out count))
-                    counts[element[discreteAttribute]] = count + 1;
-            }
-
-            var picker = new ProbabilityPicker(ConvertToProbabilities(counts));
-
-            foreach (var element in elements)
-            {
-                if (!counts.ContainsKey(element[discreteAttribute]))
-                    element[discreteAttribute] = picker.Pick();
-                //element[discreteAttribute] = picker.PickMax();
-            }
-        }
-
-        static List<Tuple<string, double>> ConvertToProbabilities(Dictionary<string, double> counts)
-        {
-            double totals = counts.Values.Sum();
-
-            return counts.Select(counter => new Tuple<string, double>(counter.Key, counter.Value / totals * 100)).ToList();
         }
 
         static void ParseDataFile(IEnumerable<string> lines, Regex hRegex, Regex vRegex, string[] splitOptions,
@@ -167,22 +191,25 @@ namespace HW1
 
     public class TreeNode
     {
-        readonly Dictionary<string/*value*/, TreeNode> children;
+        readonly ConcurrentDictionary<string, TreeNode> children;
         readonly DiscreteAttribute attribute;
         Func<bool> decision;
 
         public TreeNode(string value, List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
             Value = value;
-            children = new Dictionary<string, TreeNode>();
+            children = new ConcurrentDictionary<string, TreeNode>();
             if (DecideTrue(records)) return;
             if (DecideFalse(records)) return;
 
             DecideByMajority(records);
 
-            attribute = DecisionTree.GetBestHeader(records, attributes);
-            if (!IsLeafNode())
-                BuildChildNodes(attributes, records, fracCertainty);
+
+            attribute = DecisionTree.GetBestAttribute(records, attributes);
+            if (IsLeafNode()) return;
+
+            //DecisionTree.AssignProbabilitiesByClass(attribute, records);
+            BuildChildNodes(attributes, records, fracCertainty);
         }
 
         public void Print()
@@ -210,6 +237,8 @@ namespace HW1
             Label += $@"=> Attribute={attribute.Name}";
             var groups = records.GroupBy(record => record[attribute]).ToList();
 
+            if (groups.Count == 1) return;
+
             ChiSquareTest chiSquare = CalculateChiSquare(records.Count(rec => rec), records.Count, groups);
             chiSquare.Size = 1 - fracCertainty;
 
@@ -217,9 +246,8 @@ namespace HW1
 
             Parallel.ForEach(groups, group =>
             {
-                lock (children)
-                    children.Add(group.Key, new TreeNode(group.Key, attributes.Except(new[] { attribute }).ToList(),
-                                                         group.ToList(), fracCertainty));
+                children.TryAdd(group.Key, new TreeNode(group.Key, attributes.Except(new[] { attribute }).ToList(),
+                                                     group.ToList(), fracCertainty));
             });
         }
 
@@ -303,18 +331,17 @@ namespace HW1
 
         public int Depth() => root.Depth();
 
-        public static DiscreteAttribute GetBestHeader(List<Record> recordsSet, List<DiscreteAttribute> headersSet)
+        public static DiscreteAttribute GetBestAttribute(List<Record> recordsSet, List<DiscreteAttribute> headersSet)
         {
             if (!headersSet.Any()) return null;
 
             var gains = new ConcurrentDictionary<double/*gain*/, DiscreteAttribute>();
             Parallel.ForEach(headersSet, header =>
+            //headersSet.ForEach(header =>
             {
                 double gain = CalculateGain(recordsSet, header);
-                lock (gains)
-                {
-                    gains.TryAdd(gain, header);
-                }
+                //double ratio = CalculateRatio(recordsSet, header);
+                gains.TryAdd(gain, header);
             });
 
             return gains[gains.Keys.Max()];
@@ -346,15 +373,65 @@ namespace HW1
             int positives = CountPositiveExamples(samplesSet);
             double entropyBefore = CalculateEntropy(positives, samplesSet.Count - positives);
 
-            double entropyAfter = 0.0d;
-            foreach (var group in samplesSet.GroupBy(sample => sample[discreteAttribute]))
-            {
-                int groupTotals = group.Count();
-                int groupPositives = CountPositiveExamples(group);
-                entropyAfter += CalculateEntropy(groupPositives, groupTotals - groupPositives) * groupTotals / samplesSet.Count;
-            }
+            double entropyAfter = (from @group in samplesSet.GroupBy(sample => sample[discreteAttribute])
+                                   where discreteAttribute.Values.Contains(@group.Key)
+                                   let groupTotals = @group.Count()
+                                   let groupPositives = CountPositiveExamples(@group)
+                                   select CalculateEntropy(groupPositives, groupTotals - groupPositives) * groupTotals / samplesSet.Count).Sum();
 
             return entropyBefore - entropyAfter;
+        }
+        static double CalculateRatio(List<Record> recordsSet, DiscreteAttribute header)
+        {
+            double result = 0.0d;
+            foreach (var grouping in recordsSet.GroupBy(record => record[header]))
+                result = result + CalcPartEntropy(grouping.Count(), recordsSet.Count);
+            return result;
+        }
+
+        public static void AssignProbabilitiesByClass(List<DiscreteAttribute> attributes, List<Record> trainingSet)
+        {
+            //var groups = trainingSet.GroupBy(elem => elem.IsPositive);
+            //foreach (var group in groups)
+            Parallel.ForEach(attributes, attribute => AssignProbabilitiesByClass(attribute, trainingSet));
+            //Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
+        }
+
+        public static void AssignProbabilitiesByClass(DiscreteAttribute attribute, List<Record> trainingSet)
+        {
+            var groups = trainingSet.GroupBy(elem => elem.IsPositive);
+            foreach (var group in groups)
+                AssignProbabilities(attribute, group.ToList());
+        }
+
+
+        // This method is called by multiple threads to modify the same list of elements and is not synchronized.
+        // However, it is thread safe due to mutation slicing: each invocation will modify exactly one index of the values
+        public static void AssignProbabilities(DiscreteAttribute discreteAttribute, List<Record> elements)
+        {
+            var counts = new Dictionary<string /*value*/, double /*count*/>();
+            Array.ForEach(discreteAttribute.Values, str => counts.Add(str, 0));
+            foreach (var element in elements)
+            {
+                double count;
+                if (counts.TryGetValue(element[discreteAttribute], out count))
+                    counts[element[discreteAttribute]] = count + 1;
+            }
+
+            var picker = new ProbabilityPicker(ConvertToProbabilities(counts));
+
+            foreach (var element in elements)
+            {
+                if (!counts.ContainsKey(element[discreteAttribute]))
+                    element[discreteAttribute] = picker.Pick();
+            }
+        }
+
+        static List<Tuple<string, double>> ConvertToProbabilities(Dictionary<string, double> counts)
+        {
+            double totals = counts.Values.Sum();
+
+            return counts.Select(counter => new Tuple<string, double>(counter.Key, counter.Value / totals * 100)).ToList();
         }
     }
 
@@ -426,7 +503,7 @@ namespace HW1
     {
         public int Index { get; }
         public string Name { get; }
-        public string[] Values { get; }
+        public string[] Values { get; set; }
 
         public DiscreteAttribute(int index, string name, string[] values)
         {
