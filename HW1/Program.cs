@@ -14,6 +14,8 @@ namespace HW1
 {
     public class Program
     {
+        const bool RANDOMIZE_DATASETS = false;
+        const int TOTAL_TESTS = 20;
         //const string RELATION = "@relation";
         const string HEADER = "@attribute";
         const string DATA = "@data";
@@ -33,33 +35,45 @@ namespace HW1
             string[] trainingData = File.ReadAllLines(trainingSetPath);
             string[] testData = File.ReadAllLines(testSetPath);
 
-            double[] fracCertainties = { 0.99d, 0.95d, 0.90d, 0 };
-            var results = new Dictionary<double /*fracCertainty*/, List<Tuple<double /*accuracy*/, double /*sanity*/>>>();
-            for (int i = 0; i < 10; i++)
+            double[] fracCertainties = { 0.999, 0.99d, 0.95d, 0.90d, 0 };
+            var results = new Dictionary<double /*fracCertainty*/, List<Tuple<double /*accuracy*/, double /*sanity*/, int /*treeSize*/, int /*treeDepth*/>>>();
+            for (int i = 0; i < TOTAL_TESTS; i++)
             {
-                Console.WriteLine($"Test #{i}");
+                Console.WriteLine($"Test (#{i}/{TOTAL_TESTS}) with RANDOMIZATION={RANDOMIZE_DATASETS}");
                 var testResults = PerformSingleTest(trainingData, testData, fracCertainties);
                 for (int index = 0; index < testResults.Length; index++)
                 {
-                    List<Tuple<double /*accuracy*/, double /*sanity*/>> value;
+                    List<Tuple<double /*accuracy*/, double /*sanity*/, int /*treeSize*/, int /*treeDepth*/>> value;
                     if (!results.TryGetValue(fracCertainties[index], out value))
                     {
-                        results[fracCertainties[index]] = value = new List<Tuple<double, double>>();
+                        results[fracCertainties[index]] = value = new List<Tuple<double, double, int, int>>();
                     }
                     value.Add(testResults[index]);
                 }
             }
 
+            int idx = 0;
             foreach (var kvp in results)
-                Console.WriteLine($"DOC={kvp.Key}, AvgAccuracy={kvp.Value.Average(x => x.Item1)}, AvgSanity={kvp.Value.Average(x => x.Item2)}");
+            {
+                Print($"[{fracCertainties[idx]}] Accuracy", kvp.Value, x => x.Item1);
+                Print($"[{fracCertainties[idx]}] Sanity", kvp.Value, x => x.Item2);
+                Print($"[{fracCertainties[idx]}] dTree.Size", kvp.Value, x => x.Item3);
+                Print($"[{fracCertainties[idx]}] dTree.Depth", kvp.Value, x => x.Item4);
+                idx++;
+            }
         }
 
-        static Tuple<double/*accuracy*/, double/*sanity*/>[] PerformSingleTest(string[] trainingData, string[] testData, double[] fracCertainties)
+        static void Print<T>(string label, List<T> values, Func<T, double> expression)
+        {
+            Console.WriteLine($"{label}: Avg={values.Average(expression)}, Min={values.Min(expression)}, Max={values.Max(expression)}.%n");
+        }
+
+        static Tuple<double/*accuracy*/, double/*sanity*/, int/*TreeSize */, int/*tree depth*/>[] PerformSingleTest(string[] trainingData, string[] testData, double[] fracCertainties)
         {
             Console.WriteLine($"{GetTimeStamp()} Loading training data...");
             //Extract training set
             List<DiscreteAttribute> attributes;
-            List<Record> trainingSet = RandomizeDataSet(ExtractDataSet(trainingData, out attributes));
+            List<Record> trainingSet = ExtractDataSet(trainingData, out attributes, randomize: RANDOMIZE_DATASETS);
 
             //PrintStats(trainingSet, attributes);
             // Assign missing attributes by probabilities by class
@@ -68,12 +82,12 @@ namespace HW1
 
             Console.WriteLine($"{GetTimeStamp()} Loading test data...");
             List<DiscreteAttribute> testAttributes;
-            List<Record> testSet = RandomizeDataSet(ExtractDataSet(testData, out testAttributes));
+            List<Record> testSet = ExtractDataSet(testData, out testAttributes, randomize: RANDOMIZE_DATASETS);
             // Assign missing attributes by probabilities (Note: we are not using probabilities by class, as the aim is to predict the class)
             Console.WriteLine($"{GetTimeStamp()} Handle misisng attributes...");
             Parallel.ForEach(testAttributes, attribute => DecisionTree.AssignProbabilities(attribute, testSet));
 
-            var accuracyStats = new Tuple<double, double>[fracCertainties.Length];
+            var accuracyStats = new Tuple<double, double, int, int>[fracCertainties.Length];
             DecisionTree dTree = new DecisionTree(attributes, trainingSet);
             for (int index = 0; index < fracCertainties.Length; index++)
             {
@@ -82,13 +96,15 @@ namespace HW1
                 dTree.Build(fracCertainty);
                 double predictionAccuracy = CalculateAccuracy(testSet, dTree);
                 double sanityCheckAccuracy = CalculateAccuracy(trainingSet, dTree);
-                accuracyStats[index] = new Tuple<double, double>(predictionAccuracy, sanityCheckAccuracy);
+                accuracyStats[index] = new Tuple<double, double, int, int>(predictionAccuracy, sanityCheckAccuracy, dTree.Size(), dTree.Depth());
                 // Perform sanity check by validating the training set
                 Console.WriteLine(
                     $"{GetTimeStamp()} Prediction% / Sanity% = {predictionAccuracy}% / {sanityCheckAccuracy}% " +
                     $"with DOC={fracCertainty} " +
                     $"and ID3.size={dTree.Size()} " +
                     $"and ID3.depth={dTree.Depth()}");
+
+                dTree.Print();
             }
 
             return accuracyStats;
@@ -116,19 +132,16 @@ namespace HW1
         static List<Record> RandomizeDataSet(List<Record> trainingSet)
         {
             Random rand = new Random(); // Uses Environment.Tickcount which is effectively a random seed
-            //trainingSet = trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
-            return trainingSet;
+            return trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
         }
 
-        static List<Record> ExtractDataSet(IEnumerable<string> textLines, out List<DiscreteAttribute> attributes)
+        static List<Record> ExtractDataSet(IEnumerable<string> textLines, out List<DiscreteAttribute> attributes, bool randomize)
         {
             List<Record> trainingSet;
             ParseDataFile(textLines, GetRegex(H_PATTERN), GetRegex(V_PATTERN), SplitArgs, out attributes,
                 out trainingSet);
             attributes = attributes.Except(new[] { attributes.Last() }).ToList(); // Remove the boolean column
-            //foreach (var attribute in attributes)
-            //    attribute.Values = new List<string>(attribute.Values) { "?" }.ToArray();
-            return trainingSet;
+            return randomize ? RandomizeDataSet(trainingSet) : trainingSet;
         }
 
         static double CalculateAccuracy(List<Record> validationSet, DecisionTree tree)
@@ -212,11 +225,13 @@ namespace HW1
             BuildChildNodes(attributes, records, fracCertainty);
         }
 
-        public void Print()
+        public void Print(int level)
         {
-            Console.WriteLine($"{Label}");
+            for (int i = 0; i < level; i++)
+                Console.Write("\t");
+            Console.WriteLine($"[Level={level}] {Label}");
             foreach (TreeNode childNode in children.Values)
-                childNode.Print();
+                childNode.Print(level + 1);
         }
 
         public string Label { get; set; }
@@ -234,7 +249,7 @@ namespace HW1
 
         void BuildChildNodes(List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
-            Label += $@"=> Attribute={attribute.Name}";
+            Label += $@"Value={Value} => Attribute={attribute.Name}";
             var groups = records.GroupBy(record => record[attribute]).ToList();
 
             if (groups.Count == 1) return;
@@ -273,7 +288,7 @@ namespace HW1
         {
             double positive = records.Count(record => record);
             decision = () => 100 * positive / records.Count > 50;
-            Label = decision() ? bool.TrueString : bool.FalseString;
+            Label = $"{Value} => {(decision() ? bool.TrueString : bool.FalseString)}";
         }
 
         bool DecideFalse(List<Record> records)
@@ -282,6 +297,7 @@ namespace HW1
             {
                 decision = () => false;
                 Label = bool.FalseString;
+                Label = $"{Value} => {bool.FalseString}";
                 return true;
             }
             return false;
@@ -292,7 +308,7 @@ namespace HW1
             if (records.TrueForAll(record => record.IsPositive))
             {
                 decision = () => true;
-                Label = bool.TrueString;
+                Label = $"{Value} => {bool.TrueString}";
                 return true;
             }
             return false;
@@ -325,7 +341,7 @@ namespace HW1
 
         public bool Test(Record instance) => root.Test(instance);
 
-        public void Print() => root.Print();
+        public void Print() => root.Print(1);
 
         public int Size() => root.Size();
 
