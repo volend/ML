@@ -5,17 +5,17 @@ using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
-using System.Security.AccessControl;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Accord.Statistics.Analysis;
 using Accord.Statistics.Testing;
 
 namespace HW1
 {
     public class Program
     {
-        const bool RANDOMIZE_DATASETS = false;
-        const int TOTAL_TESTS = 20;
+        const bool RANDOMIZE_DATASETS = true;
+        const int TOTAL_TESTS = 3;
         //const string RELATION = "@relation";
         const string HEADER = "@attribute";
         const string DATA = "@data";
@@ -35,19 +35,17 @@ namespace HW1
             string[] trainingData = File.ReadAllLines(trainingSetPath);
             string[] testData = File.ReadAllLines(testSetPath);
 
-            double[] fracCertainties = { 0.999, 0.99d, 0.95d, 0.90d, 0 };
-            var results = new Dictionary<double /*fracCertainty*/, List<Tuple<double /*accuracy*/, double /*sanity*/, int /*treeSize*/, int /*treeDepth*/>>>();
+            double[] fracCertainties = { 0.99d, 0.95d, 0.90d, 0 };
+            var results = new Dictionary<double /*doc*/, List<Tuple<ConfusionMatrix, int /*treeSize*/, int /*treeDepth*/>>>();
             for (int i = 0; i < TOTAL_TESTS; i++)
             {
-                Console.WriteLine($"Test (#{i}/{TOTAL_TESTS}) with RANDOMIZATION={RANDOMIZE_DATASETS}");
+                Console.WriteLine($"Test #({i}/{TOTAL_TESTS}) with RANDOMIZATION={RANDOMIZE_DATASETS}");
                 var testResults = PerformSingleTest(trainingData, testData, fracCertainties);
                 for (int index = 0; index < testResults.Length; index++)
                 {
-                    List<Tuple<double /*accuracy*/, double /*sanity*/, int /*treeSize*/, int /*treeDepth*/>> value;
+                    List<Tuple<ConfusionMatrix, int /*treeSize*/, int /*treeDepth*/>> value;
                     if (!results.TryGetValue(fracCertainties[index], out value))
-                    {
-                        results[fracCertainties[index]] = value = new List<Tuple<double, double, int, int>>();
-                    }
+                        results[fracCertainties[index]] = value = new List<Tuple<ConfusionMatrix, int, int>>();
                     value.Add(testResults[index]);
                 }
             }
@@ -55,20 +53,20 @@ namespace HW1
             int idx = 0;
             foreach (var kvp in results)
             {
-                Print($"[{fracCertainties[idx]}] Accuracy", kvp.Value, x => x.Item1);
-                Print($"[{fracCertainties[idx]}] Sanity", kvp.Value, x => x.Item2);
-                Print($"[{fracCertainties[idx]}] dTree.Size", kvp.Value, x => x.Item3);
-                Print($"[{fracCertainties[idx]}] dTree.Depth", kvp.Value, x => x.Item4);
+                Print($"[{fracCertainties[idx]}] Accuracy", kvp.Value, x => x.Item1.Accuracy);
+                Print($"[{fracCertainties[idx]}] StandardError", kvp.Value, x => x.Item1.StandardError);
+                Print($"[{fracCertainties[idx]}] dTree.Size", kvp.Value, x => x.Item2);
+                Print($"[{fracCertainties[idx]}] dTree.Depth", kvp.Value, x => x.Item3);
                 idx++;
             }
         }
 
         static void Print<T>(string label, List<T> values, Func<T, double> expression)
         {
-            Console.WriteLine($"{label}: Avg={values.Average(expression)}, Min={values.Min(expression)}, Max={values.Max(expression)}.%n");
+            Console.WriteLine($"{label}: Avg={values.Average(expression)}, Min={values.Min(expression)}, Max={values.Max(expression)}.");
         }
 
-        static Tuple<double/*accuracy*/, double/*sanity*/, int/*TreeSize */, int/*tree depth*/>[] PerformSingleTest(string[] trainingData, string[] testData, double[] fracCertainties)
+        static Tuple<ConfusionMatrix, int/*TreeSize */, int/*tree depth*/>[] PerformSingleTest(string[] trainingData, string[] testData, double[] fracCertainties)
         {
             Console.WriteLine($"{GetTimeStamp()} Loading training data...");
             //Extract training set
@@ -78,33 +76,45 @@ namespace HW1
             //PrintStats(trainingSet, attributes);
             // Assign missing attributes by probabilities by class
             Console.WriteLine($"{GetTimeStamp()} Handle misisng attributes...");
-            DecisionTree.AssignProbabilitiesByClass(attributes, trainingSet);
+            //DecisionTree.AssignProbabilitiesByClass(attributes, trainingSet, false);
+            Parallel.ForEach(attributes, attribute => DecisionTree.AssignProbabilities(attribute, trainingSet));
 
             Console.WriteLine($"{GetTimeStamp()} Loading test data...");
             List<DiscreteAttribute> testAttributes;
             List<Record> testSet = ExtractDataSet(testData, out testAttributes, randomize: RANDOMIZE_DATASETS);
             // Assign missing attributes by probabilities (Note: we are not using probabilities by class, as the aim is to predict the class)
             Console.WriteLine($"{GetTimeStamp()} Handle misisng attributes...");
-            Parallel.ForEach(testAttributes, attribute => DecisionTree.AssignProbabilities(attribute, testSet));
+            Parallel.ForEach(testAttributes, attribute => DecisionTree.AssignProbabilities(attribute, testSet.Union(trainingSet).ToList()));
+            //DecisionTree.AssignProbabilitiesByClass(testAttributes, testSet.Union(trainingSet).ToList(), false);
 
-            var accuracyStats = new Tuple<double, double, int, int>[fracCertainties.Length];
+            var accuracyStats = new Tuple<ConfusionMatrix, int, int>[fracCertainties.Length];
             DecisionTree dTree = new DecisionTree(attributes, trainingSet);
+
             for (int index = 0; index < fracCertainties.Length; index++)
             {
                 var fracCertainty = fracCertainties[index];
                 Console.WriteLine($"{GetTimeStamp()} Building decision tree...");
                 dTree.Build(fracCertainty);
-                double predictionAccuracy = CalculateAccuracy(testSet, dTree);
-                double sanityCheckAccuracy = CalculateAccuracy(trainingSet, dTree);
-                accuracyStats[index] = new Tuple<double, double, int, int>(predictionAccuracy, sanityCheckAccuracy, dTree.Size(), dTree.Depth());
+                var confusionMatrix = CalculateAccuracy(testSet, dTree);
+                var confusionMatrix1 = CalculateAccuracy(trainingSet, dTree);
+                accuracyStats[index] = new Tuple<ConfusionMatrix, int, int>(confusionMatrix, dTree.Size(), dTree.Depth());
                 // Perform sanity check by validating the training set
                 Console.WriteLine(
-                    $"{GetTimeStamp()} Prediction% / Sanity% = {predictionAccuracy}% / {sanityCheckAccuracy}% " +
-                    $"with DOC={fracCertainty} " +
-                    $"and ID3.size={dTree.Size()} " +
-                    $"and ID3.depth={dTree.Depth()}");
+                    $"{GetTimeStamp()} \nPositivePredictiveValue={confusionMatrix.PositivePredictiveValue}%\n" +
+                    $"NegativePredictiveValue={confusionMatrix.NegativePredictiveValue}%\n" +
+                    $"with DOC={fracCertainty}\n" +
+                    $"ID3.size={dTree.Size()} " +
+                    $"and ID3.depth={dTree.Depth()}\n");
 
-                dTree.Print();
+                //dTree.Print();
+                //var ruleSet = new List<DecisionRule>();
+                //dTree.BuildRuleSets(ruleSet);
+                //foreach (var rulesGroup in ruleSet.GroupBy(rule => rule.Positive))
+                //{
+                //    Console.WriteLine($"Printing rules with Value = {rulesGroup.Key}");
+                //    foreach (var rule in rulesGroup)
+                //        Console.WriteLine($"Rule: {rule.Label}");
+                //}
             }
 
             return accuracyStats;
@@ -132,7 +142,7 @@ namespace HW1
         static List<Record> RandomizeDataSet(List<Record> trainingSet)
         {
             Random rand = new Random(); // Uses Environment.Tickcount which is effectively a random seed
-            return trainingSet.OrderBy(x => rand.NextDouble()).ToList(); // Completely randomize the data set
+            return trainingSet.AsParallel().OrderBy(x => rand.NextDouble()).ToList();//.ThenByDescending(x => rand.NextDouble()).ToList(); // Completely randomize the data set
         }
 
         static List<Record> ExtractDataSet(IEnumerable<string> textLines, out List<DiscreteAttribute> attributes, bool randomize)
@@ -144,12 +154,13 @@ namespace HW1
             return randomize ? RandomizeDataSet(trainingSet) : trainingSet;
         }
 
-        static double CalculateAccuracy(List<Record> validationSet, DecisionTree tree)
+        static ConfusionMatrix CalculateAccuracy(List<Record> validationSet, DecisionTree tree)
         {
-            double positive = validationSet.Count(record => record.IsPositive);
-            double predictedPositive = validationSet.AsParallel().Count(tree.Test);
-
-            return Math.Round(100 - Math.Abs(predictedPositive - positive) / positive * 100);
+            int truePositives = validationSet.AsParallel().Count(record => tree.Test(record) && record.IsPositive);
+            int falsePositives = validationSet.AsParallel().Count(record => tree.Test(record) && !record.IsPositive);
+            int trueNegatives = validationSet.AsParallel().Count(record => !tree.Test(record) && !record.IsPositive);
+            int falseNegatives = validationSet.AsParallel().Count(record => !tree.Test(record) && record.IsPositive);
+            return new ConfusionMatrix(truePositives, falseNegatives, falsePositives, trueNegatives);
         }
 
         static Regex GetRegex(string pattern)
@@ -204,24 +215,24 @@ namespace HW1
 
     public class TreeNode
     {
+        readonly TreeNode parent;
         readonly ConcurrentDictionary<string, TreeNode> children;
-        readonly DiscreteAttribute attribute;
+        readonly DiscreteAttribute splitAttribute;
         Func<bool> decision;
 
-        public TreeNode(string value, List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
+        public TreeNode(TreeNode parent, string value, List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
+            this.parent = parent;
             Value = value;
             children = new ConcurrentDictionary<string, TreeNode>();
             if (DecideTrue(records)) return;
             if (DecideFalse(records)) return;
 
-            DecideByMajority(records);
+            DecideWithProbability(records);
 
-
-            attribute = DecisionTree.GetBestAttribute(records, attributes);
+            splitAttribute = DecisionTree.GetBestAttribute(records, attributes);
             if (IsLeafNode()) return;
 
-            //DecisionTree.AssignProbabilitiesByClass(attribute, records);
             BuildChildNodes(attributes, records, fracCertainty);
         }
 
@@ -240,17 +251,17 @@ namespace HW1
 
         public bool Test(Record instance)
         {
-            if (attribute == null)
+            if (splitAttribute == null)
                 return decision();
 
             TreeNode nextNode;
-            return children.TryGetValue(instance[attribute], out nextNode) ? nextNode.Test(instance) : decision();
+            return children.TryGetValue(instance[splitAttribute], out nextNode) ? nextNode.Test(instance) : decision();
         }
 
         void BuildChildNodes(List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
         {
-            Label += $@"Value={Value} => Attribute={attribute.Name}";
-            var groups = records.GroupBy(record => record[attribute]).ToList();
+            Label += $@"Value={Value} => Attribute={splitAttribute.Name}";
+            var groups = records.GroupBy(record => record[splitAttribute]).ToList();
 
             if (groups.Count == 1) return;
 
@@ -260,8 +271,9 @@ namespace HW1
             if (!chiSquare.Significant) return;
 
             Parallel.ForEach(groups, group =>
+            //groups.ForEach(group =>
             {
-                children.TryAdd(group.Key, new TreeNode(group.Key, attributes.Except(new[] { attribute }).ToList(),
+                children.TryAdd(group.Key, new TreeNode(this, group.Key, attributes.Except(new[] { splitAttribute }).ToList(),
                                                      group.ToList(), fracCertainty));
             });
         }
@@ -279,16 +291,21 @@ namespace HW1
                 pObserved[i * 2 + 1] = groups[i].Count(record => !record);
             }
 
+
             return new ChiSquareTest(pExpected, pObserved, groups.Count - 1);
         }
 
-        bool IsLeafNode() => attribute == null;
+        bool IsLeafNode() => splitAttribute == null;
 
-        void DecideByMajority(List<Record> records)
+        void DecideWithProbability(List<Record> records)
         {
+            //decision = () => false;
             double positive = records.Count(record => record);
-            decision = () => 100 * positive / records.Count > 50;
-            Label = $"{Value} => {(decision() ? bool.TrueString : bool.FalseString)}";
+            decision = () => positive * 2 >= records.Count;
+            //var random = new Random();
+            //double pPositive = positive / records.Count;
+            //decision = () => random.NextDouble() <= pPositive;
+            Label = $"{Value} => [p={positive / records.Count}] {(decision() ? bool.TrueString : bool.FalseString)}";
         }
 
         bool DecideFalse(List<Record> records)
@@ -320,6 +337,61 @@ namespace HW1
         {
             return 1 + (children.Any() ? children.Values.Max(node => node.Depth()) : 0);
         }
+
+        public void BuildRuleSets(List<DecisionRule> ruleSets)
+        {
+            if (IsLeafNode())
+            {
+                TreeNode node = this; // A leaf node always has a parent unless it's the root
+                //var expression = new Stack<string>();
+                var ruleExpression = new DecisionRule($" then => {decision()}", x => decision(), decision());
+
+                //expression.Push($" then => {decision()}");
+                while (node.parent != null)
+                {
+                    //expression.Push($" if [Attribute {node.parent.splitAttribute.Name} has Value {node.Value}] and ");
+                    var localNode = node;
+                    ruleExpression =
+                        ruleExpression.Prepend(new DecisionRule(
+                                $" if [Attribute {node.parent.splitAttribute.Name} has Value {node.Value}] and ",
+                                x => x[localNode.parent.splitAttribute] == localNode.Value));
+                    node = node.parent;
+                    //sb.Append($"and Attribute={Attribute}")
+                }
+
+                lock (ruleSets)
+                {
+                    ruleSets.Add(ruleExpression);
+                }
+            }
+            else
+            {
+                foreach (var childNode in children.Values)
+                    childNode.BuildRuleSets(ruleSets);
+            }
+        }
+    }
+
+    public class DecisionRule
+    {
+        public bool Positive { get; protected set; }
+        public string Label { get; protected set; }
+        public Func<Record, bool> Func { get; protected set; }
+
+        public DecisionRule(string label, Func<Record, bool> func, bool positive = false)
+        {
+            Label = label;
+            Func = func;
+            Positive = positive;
+        }
+
+        public DecisionRule Prepend(DecisionRule rule)
+        {
+            rule.Positive = Positive;
+            rule.Label += Label;
+            rule.Func = x => rule.Func(x) && Func(x);
+            return rule;
+        }
     }
 
     public class DecisionTree
@@ -327,6 +399,7 @@ namespace HW1
         readonly List<Record> records;
         readonly List<DiscreteAttribute> attributes;
         TreeNode root;
+        double fracCertainty;
 
         public DecisionTree(List<DiscreteAttribute> attributes, List<Record> records)
         {
@@ -334,14 +407,20 @@ namespace HW1
             this.records = records;
         }
 
-        public void Build(double fracCertainty)
+        public void Build(double doc)
         {
-            root = new TreeNode("root", attributes, records, fracCertainty);
+            fracCertainty = doc;
+            root = new TreeNode(null, "root", attributes, records, fracCertainty);
+        }
+
+        public void BuildRuleSets(List<DecisionRule> ruleSets)
+        {
+            root.BuildRuleSets(ruleSets);
         }
 
         public bool Test(Record instance) => root.Test(instance);
 
-        public void Print() => root.Print(1);
+        public void Print() => root.Print(0);
 
         public int Size() => root.Size();
 
@@ -351,16 +430,34 @@ namespace HW1
         {
             if (!headersSet.Any()) return null;
 
-            var gains = new ConcurrentDictionary<double/*gain*/, DiscreteAttribute>();
-            Parallel.ForEach(headersSet, header =>
-            //headersSet.ForEach(header =>
+            double bestGain = 0;
+            DiscreteAttribute bestAttribute = null;
+            Parallel.ForEach(headersSet.ToArray(), header =>
             {
-                double gain = CalculateGain(recordsSet, header);
+                var gain = CalculateGain(recordsSet, header);
                 //double ratio = CalculateRatio(recordsSet, header);
-                gains.TryAdd(gain, header);
+                if (gain.Item1)
+                //if (true)
+                {
+                    lock (typeof(DecisionTree))
+                    {
+                        if (gain.Item2> bestGain)
+                        {
+                            bestGain = gain.Item2;
+                            bestAttribute = header;
+                        }
+                    }
+                }
+                else
+                {
+                    lock (headersSet)
+                    {
+                        headersSet.Remove(header);
+                    }
+                }
             });
 
-            return gains[gains.Keys.Max()];
+            return bestAttribute;
         }
 
         public static double CalculateEntropy(List<Record> sampleSet)
@@ -384,18 +481,25 @@ namespace HW1
 
         static int CountPositiveExamples(IEnumerable<Record> sampleSet) => sampleSet.Count(positive => positive);
 
-        static double CalculateGain(List<Record> samplesSet, DiscreteAttribute discreteAttribute)
+        static Tuple<bool/*significant*/, double> CalculateGain(List<Record> samplesSet, DiscreteAttribute attribute)
         {
+
+            double entropyAfter = 0;
+            foreach (var @group in samplesSet.GroupBy(sample => sample[attribute]))
+            {
+                //if (attribute.Values.Contains(@group.Key))
+                {
+                    int groupTotals = @group.Count();
+                    int groupPositives = CountPositiveExamples(@group);
+                    entropyAfter += CalculateEntropy(groupPositives, groupTotals - groupPositives) * groupTotals /
+                                    samplesSet.Count;
+                }
+            }
+
             int positives = CountPositiveExamples(samplesSet);
             double entropyBefore = CalculateEntropy(positives, samplesSet.Count - positives);
 
-            double entropyAfter = (from @group in samplesSet.GroupBy(sample => sample[discreteAttribute])
-                                   where discreteAttribute.Values.Contains(@group.Key)
-                                   let groupTotals = @group.Count()
-                                   let groupPositives = CountPositiveExamples(@group)
-                                   select CalculateEntropy(groupPositives, groupTotals - groupPositives) * groupTotals / samplesSet.Count).Sum();
-
-            return entropyBefore - entropyAfter;
+            return new Tuple<bool, double>(entropyAfter < entropyBefore, entropyBefore - entropyAfter);
         }
         static double CalculateRatio(List<Record> recordsSet, DiscreteAttribute header)
         {
@@ -405,41 +509,52 @@ namespace HW1
             return result;
         }
 
-        public static void AssignProbabilitiesByClass(List<DiscreteAttribute> attributes, List<Record> trainingSet)
+        public static void AssignProbabilitiesByClass(List<DiscreteAttribute> attributes, List<Record> trainingSet, bool pruneOutliers)
         {
-            //var groups = trainingSet.GroupBy(elem => elem.IsPositive);
-            //foreach (var group in groups)
-            Parallel.ForEach(attributes, attribute => AssignProbabilitiesByClass(attribute, trainingSet));
-            //Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, trainingSet));
+            var outliers = new List<DiscreteAttribute>();
+            var groups = trainingSet.GroupBy(elem => elem.IsPositive);
+            foreach (var group in groups)
+                Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, group.ToList(), outliers));
+            //Parallel.ForEach(attributes, attribute => AssignProbabilitiesByClass(attribute, trainingSet));
+            if (pruneOutliers)
+            {
+                foreach (var attr in outliers)
+                    attributes.Remove(attr);
+            }
         }
 
         public static void AssignProbabilitiesByClass(DiscreteAttribute attribute, List<Record> trainingSet)
         {
             var groups = trainingSet.GroupBy(elem => elem.IsPositive);
             foreach (var group in groups)
-                AssignProbabilities(attribute, group.ToList());
+                AssignProbabilities(attribute, group.ToList(), new List<DiscreteAttribute>());
         }
 
 
         // This method is called by multiple threads to modify the same list of elements and is not synchronized.
         // However, it is thread safe due to mutation slicing: each invocation will modify exactly one index of the values
-        public static void AssignProbabilities(DiscreteAttribute discreteAttribute, List<Record> elements)
+        public static void AssignProbabilities(DiscreteAttribute attribute, List<Record> elements, List<DiscreteAttribute> outliers = null)
         {
             var counts = new Dictionary<string /*value*/, double /*count*/>();
-            Array.ForEach(discreteAttribute.Values, str => counts.Add(str, 0));
+            Array.ForEach(attribute.Values, str => counts.Add(str, 0));
             foreach (var element in elements)
             {
                 double count;
-                if (counts.TryGetValue(element[discreteAttribute], out count))
-                    counts[element[discreteAttribute]] = count + 1;
+                if (counts.TryGetValue(element[attribute], out count))
+                    counts[element[attribute]] = count + 1;
             }
 
             var picker = new ProbabilityPicker(ConvertToProbabilities(counts));
+            if (!picker.IsSignificant() && outliers != null)
+            {
+                lock (outliers)
+                    outliers.Add(attribute);
+            }
 
             foreach (var element in elements)
             {
-                if (!counts.ContainsKey(element[discreteAttribute]))
-                    element[discreteAttribute] = picker.Pick();
+                if (!counts.ContainsKey(element[attribute]))
+                    element[attribute] = picker.Pick();
             }
         }
 
@@ -462,17 +577,19 @@ namespace HW1
             random = new Random(1000);
         }
 
+        public bool IsSignificant() => probabilities.Sum(x => x.Item2) > 50;
+
         // Convert to probabilities based on percentages in order to use a random number generator
         // (i.e. if start with A=10%, B=20% and D=70%, after the conversion values will be: A=10%, B=30%, D=100%)
         public string Pick()
         {
-            double diceRoll = random.NextDouble() * 100;
+            double randomChance = random.NextDouble() * 100;
             double cumulative = 0.0d;
             string result = probabilities.First().Item1;
             foreach (Tuple<string, double> tuple in probabilities)
             {
                 cumulative += tuple.Item2;
-                if (!(diceRoll < cumulative)) continue;
+                if (!(randomChance < cumulative)) continue;
                 result = tuple.Item1;
                 break;
             }
