@@ -15,12 +15,12 @@ namespace HW2
         {
             string folder = args.Length != 1 ? @"..\..\Resources\" : args[0];
 
-            Console.WriteLine($"{GetTimeStamp()} Fileds must be in folder {folder}. Use the first argument to specify another folder.");
-            Console.Write($"{GetTimeStamp()} Enter # of neighbors [50-1000]: ");
+            Console.WriteLine($"{GetTimeStamp()} Files must be in folder {folder}. Use the first argument to specify another folder.");
+            Console.Write($"{GetTimeStamp()} Enter # of neighbors [50-10000]: ");
             int neighbors;
             if (!int.TryParse(Console.ReadLine(), out neighbors))
                 Console.Write("Unable to parse input.");
-            else neighbors = neighbors < 50 ? 50 : (neighbors > 1000 ? 1000 : neighbors);
+            else neighbors = neighbors < 50 ? 50 : (neighbors > 10000 ? 10000 : neighbors);
             Console.WriteLine($"{GetTimeStamp()} neighbors set to: {neighbors}");
 
             Console.WriteLine($"{GetTimeStamp()} Loading data...");
@@ -33,7 +33,7 @@ namespace HW2
 
             RatingData trainingRatings = ParseRatingData(File.ReadAllLines(Path.Combine(folder, trainingRatingsFile)));
             RatingData testRatings = ParseRatingData(File.ReadAllLines(Path.Combine(folder, testRatingsFile)));
-            
+
             Console.WriteLine($"{GetTimeStamp()} Done.");
 
             DateTime now = DateTime.Now;
@@ -42,11 +42,8 @@ namespace HW2
             //Parallel.ForEach(testRatings.GetUsers().TakeWhile(x => Interlocked.Read(ref index) < 5000), userId =>
             Parallel.ForEach(testRatings.GetUsers(), userId =>
             {
-                if (Interlocked.Add(ref index, 1) % 1 == 0)
-                {
-                    Console.Write($"\r[{(int)(DateTime.Now - now).TotalSeconds} seconds] Processed {index}/{testRatings.GetUsersCount()} " +
-                                  $"{100 * index / testRatings.GetUsersCount()}%");
-                }
+                if (Interlocked.Add(ref index, 1) % 100 == 0)
+                    PrintProgress(index, now, testRatings.GetUsersCount());
 
                 var ratings = testRatings.GetUserRatings(userId);
                 foreach (var movieRating in ratings)
@@ -58,6 +55,8 @@ namespace HW2
                 }
             });
 
+            PrintProgress(index, now, testRatings.GetUsersCount());
+
             double mae = CalculateMAE(results);
             double mape = CalculateMAPE(results);
             double rmsd = CalculateRMSD(results);
@@ -65,6 +64,13 @@ namespace HW2
             Console.WriteLine($"MAE={mae} from {index} users (Mean Absolute Error)");
             Console.WriteLine($"MAPE={mape} from {index} users (Mean Absolute Percentage Error)");
             Console.WriteLine($"RMSD={rmsd} from {index} users (Root-mean-square deviation)");
+        }
+
+        static void PrintProgress(long index, DateTime now, int totals)
+        {
+            Console.Write(
+                $"\r[{(int)(DateTime.Now - now).TotalSeconds} seconds] Processed {index}/{totals} " +
+                $"{100 * index / totals}%");
         }
 
         static double CalculateMAPE(List<Tuple<double, double>> results) => results.Sum(x => Math.Abs(x.Item2 - x.Item1) / x.Item2) / results.Count;
@@ -85,10 +91,6 @@ namespace HW2
             var ratings = new double[lines.Length];
 
             int index = 0;
-            Parallel.ForEach(lines, line =>
-            {
-
-            });
             foreach (var line in lines.AsParallel())
             {
                 string[] values = line.Split(new[] { "," }, StringSplitOptions.RemoveEmptyEntries);
