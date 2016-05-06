@@ -61,15 +61,16 @@ namespace HW2
             double mape = CalculateMAPE(results);
             double rmsd = CalculateRMSD(results);
             Console.WriteLine();
-            Console.WriteLine($"MAE={mae} from {index} users (Mean Absolute Error)");
-            Console.WriteLine($"MAPE={mape} from {index} users (Mean Absolute Percentage Error)");
-            Console.WriteLine($"RMSD={rmsd} from {index} users (Root-mean-square deviation)");
+            Console.WriteLine($"{GetTimeStamp()} MAE={mae} (Mean Absolute Error)");
+            Console.WriteLine($"{GetTimeStamp()} MAPE={mape} (Mean Absolute Percentage Error)");
+            Console.WriteLine($"{GetTimeStamp()} RMSD={rmsd} (Root-mean-square deviation)");
         }
 
         static void PrintProgress(long index, DateTime now, int totals)
         {
+            //(int)(DateTime.Now - now).TotalSeconds
             Console.Write(
-                $"\r[{(int)(DateTime.Now - now).TotalSeconds} seconds] Processed {index}/{totals} " +
+                $"\r{GetTimeStamp()} Processed {index}/{totals} " +
                 $"{100 * index / totals}%");
         }
 
