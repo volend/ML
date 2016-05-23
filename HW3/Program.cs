@@ -10,8 +10,8 @@ namespace HW3
     {
         public static void Main(string[] args)
         {
-            //string folder31 = args.Length != 2 ? @"..\..\Resources\3.1\" : args[0];
-            //RunSpamFilter(Path.Combine(folder31, "train"), Path.Combine(folder31, "test"));
+            string folder31 = args.Length != 2 ? @"..\..\Resources\3.1\" : args[0];
+            RunSpamFilter(Path.Combine(folder31, "train"), Path.Combine(folder31, "test"));
 
             string folder33 = args.Length != 2 ? @"..\..\Resources\3.3\" : args[1];
             RunDiabetesTest(Path.Combine(folder33, "train"), Path.Combine(folder33, "test"));
@@ -262,10 +262,6 @@ namespace HW3
         {
             int yay = voters.Count(voter => voter(instance));
             int nay = voters.Count(voter => !voter(instance));
-            if (voters.Count > 1 && yay - nay == 1)
-            {
-                Console.WriteLine("Close call.");
-            }
             return yay > nay;
         }
     }
