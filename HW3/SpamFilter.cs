@@ -17,14 +17,16 @@ namespace HW3
 
         public ConfusionMatrix RunPredictions(List<Email> emails)
         {
-            var truePositives = emails.Count(email => email.IsSpam && index.IsSpam(email));
-            var trueNegatives = emails.Count(email => !email.IsSpam && !index.IsSpam(email));
-            var falsePositives = emails.Count(email => !email.IsSpam && index.IsSpam(email));
-            var falseNegatives = emails.Count(email => email.IsSpam && !index.IsSpam(email));
+            var truePositives = emails.Count(email => email.IsSpam && IsSpam(email));
+            var trueNegatives = emails.Count(email => !email.IsSpam && !IsSpam(email));
+            var falsePositives = emails.Count(email => !email.IsSpam && IsSpam(email));
+            var falseNegatives = emails.Count(email => email.IsSpam && !IsSpam(email));
 
             ConfusionMatrix result = new ConfusionMatrix(truePositives, falseNegatives, falsePositives, trueNegatives);
             return result;
         }
+
+        public bool IsSpam(Email email) => index.IsSpam(email);
 
         public enum SmoothingStyle
         {

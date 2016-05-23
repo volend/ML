@@ -5,7 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 namespace HW3
-{    
+{
     public class DiscreteAttribute
     {
         public int Index { get; }

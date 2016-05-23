@@ -12,7 +12,6 @@ namespace HW3
         readonly List<Record> records;
         readonly List<DiscreteAttribute> attributes;
         TreeNode root;
-        double fracCertainty;
 
         public DecisionTree(List<DiscreteAttribute> attributes, List<Record> records)
         {
@@ -20,10 +19,10 @@ namespace HW3
             this.records = records;
         }
 
-        public void Build(double doc)
+        public DecisionTree Build()
         {
-            fracCertainty = doc;
-            root = new TreeNode(null, "root", attributes, records, fracCertainty);
+            root = new TreeNode(null, "root", attributes, records);
+            return this;
         }
 
         public void BuildRuleSets(List<DecisionRule> ruleSets)
@@ -45,28 +44,13 @@ namespace HW3
 
             double bestGain = 0;
             DiscreteAttribute bestAttribute = null;
-            Parallel.ForEach(headersSet.ToArray(), header =>
+            headersSet.ForEach(header =>
             {
                 var gain = CalculateGain(recordsSet, header);
-                //double ratio = CalculateRatio(recordsSet, header);
-                if (gain.Item1)
-                //if (true)
+                if (gain > bestGain)
                 {
-                    lock (typeof(DecisionTree))
-                    {
-                        if (gain.Item2 > bestGain)
-                        {
-                            bestGain = gain.Item2;
-                            bestAttribute = header;
-                        }
-                    }
-                }
-                else
-                {
-                    lock (headersSet)
-                    {
-                        headersSet.Remove(header);
-                    }
+                    bestGain = gain;
+                    bestAttribute = header;
                 }
             });
 
@@ -94,7 +78,15 @@ namespace HW3
 
         static int CountPositiveExamples(IEnumerable<Record> sampleSet) => sampleSet.Count(positive => positive);
 
-        static Tuple<bool/*significant*/, double> CalculateGain(List<Record> samplesSet, DiscreteAttribute attribute)
+        static double CalculateRatio(List<Record> recordsSet, DiscreteAttribute header)
+        {
+            double result = 0.0d;
+            foreach (var grouping in recordsSet.GroupBy(record => record[header]))
+                result = result + CalcPartEntropy(grouping.Count(), recordsSet.Count);
+            return result;
+        }
+
+        static double CalculateGain(List<Record> samplesSet, DiscreteAttribute attribute)
         {
 
             double entropyAfter = 0;
@@ -112,14 +104,7 @@ namespace HW3
             int positives = CountPositiveExamples(samplesSet);
             double entropyBefore = CalculateEntropy(positives, samplesSet.Count - positives);
 
-            return new Tuple<bool, double>(entropyAfter < entropyBefore, entropyBefore - entropyAfter);
-        }
-        static double CalculateRatio(List<Record> recordsSet, DiscreteAttribute header)
-        {
-            double result = 0.0d;
-            foreach (var grouping in recordsSet.GroupBy(record => record[header]))
-                result = result + CalcPartEntropy(grouping.Count(), recordsSet.Count);
-            return result;
+            return entropyBefore - entropyAfter;
         }
 
         public static void AssignProbabilitiesByClass(List<DiscreteAttribute> attributes, List<Record> trainingSet, bool pruneOutliers)
@@ -128,7 +113,6 @@ namespace HW3
             var groups = trainingSet.GroupBy(elem => elem.IsPositive);
             foreach (var group in groups)
                 Parallel.ForEach(attributes, hdr => AssignProbabilities(hdr, group.ToList(), outliers));
-            //Parallel.ForEach(attributes, attribute => AssignProbabilitiesByClass(attribute, trainingSet));
             if (pruneOutliers)
             {
                 foreach (var attr in outliers)
@@ -185,7 +169,7 @@ namespace HW3
         readonly DiscreteAttribute splitAttribute;
         Func<bool> decision;
 
-        public TreeNode(TreeNode parent, string value, List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
+        public TreeNode(TreeNode parent, string value, List<DiscreteAttribute> attributes, List<Record> records)
         {
             this.parent = parent;
             Value = value;
@@ -196,9 +180,12 @@ namespace HW3
             DecideWithProbability(records);
 
             splitAttribute = DecisionTree.GetBestAttribute(records, attributes);
-            if (IsLeafNode()) return;
+            if (IsLeafNode())
+            {
+                return;
+            }
 
-            BuildChildNodes(attributes, records, fracCertainty);
+            BuildChildNodes(attributes, records);
         }
 
         public void Print(int level)
@@ -223,23 +210,17 @@ namespace HW3
             return children.TryGetValue(instance[splitAttribute], out nextNode) ? nextNode.Test(instance) : decision();
         }
 
-        void BuildChildNodes(List<DiscreteAttribute> attributes, List<Record> records, double fracCertainty)
+        void BuildChildNodes(List<DiscreteAttribute> attributes, List<Record> records)
         {
             Label += $@"Value={Value} => Attribute={splitAttribute.Name}";
             var groups = records.GroupBy(record => record[splitAttribute]).ToList();
 
             if (groups.Count == 1) return;
 
-            ChiSquareTest chiSquare = CalculateChiSquare(records.Count(rec => rec), records.Count, groups);
-            chiSquare.Size = 1 - fracCertainty;
-
-            if (!chiSquare.Significant) return;
-
-            Parallel.ForEach(groups, group =>
-            //groups.ForEach(group =>
+            groups.ForEach(group =>
             {
                 children.TryAdd(group.Key, new TreeNode(this, group.Key, attributes.Except(new[] { splitAttribute }).ToList(),
-                                                     group.ToList(), fracCertainty));
+                                                     group.ToList()));
             });
         }
 
@@ -256,7 +237,6 @@ namespace HW3
                 pObserved[i * 2 + 1] = groups[i].Count(record => !record);
             }
 
-
             return new ChiSquareTest(pExpected, pObserved, groups.Count - 1);
         }
 
@@ -264,8 +244,7 @@ namespace HW3
 
         void DecideWithProbability(List<Record> records)
         {
-            //decision = () => false;
-            double positive = records.Count(record => record);
+            int positive = records.Count(record => record);
             decision = () => positive * 2 >= records.Count;
             //var random = new Random();
             //double pPositive = positive / records.Count;
@@ -308,7 +287,7 @@ namespace HW3
             if (IsLeafNode())
             {
                 TreeNode node = this; // A leaf node always has a parent unless it's the root
-                //var expression = new Stack<string>();
+                                      //var expression = new Stack<string>();
                 var ruleExpression = new DecisionRule($" then => {decision()}", x => decision(), decision());
 
                 //expression.Push($" then => {decision()}");
