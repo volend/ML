@@ -3,16 +3,92 @@ using System.Collections.Generic;
 using System.Data;
 using System.IO;
 using System.Linq;
+using System.Net.Http.Headers;
+using System.Xml;
 using Accord.MachineLearning.DecisionTrees;
+using Accord.MachineLearning.VectorMachines;
+using Accord.MachineLearning.VectorMachines.Learning;
 using Accord.Math;
 using Accord.Statistics.Analysis;
 using Accord.Statistics.Filters;
+using Accord.Statistics.Kernels;
+using Microsoft.SqlServer.Server;
 
 namespace HW4
 {
     class Program
     {
+        public Program(string name)
+        {
+            Console.WriteLine($"[{GetTimeStamp()}] Runnig {name}.");
+        }
+
         static void Main(string[] args)
+        {
+            Program id3Ensemble = new Program("ID3 Diabetes Test");
+            id3Ensemble.RunID3Test();
+
+            Program kernelSVM = new Program("Kernel SVM Diabetes Test");
+            kernelSVM.RunSVMTest();
+        }
+
+        void RunSVMTest()
+        {
+            List<Record> trainingSet;
+            List<Record> testSet;
+            var table = BuildDataSets(out trainingSet, out testSet);
+
+            int[][] inputs;
+            int[] outputs;
+            var codebook = BuildCodebook(trainingSet, table, out inputs, out outputs);
+
+
+            Console.WriteLine($"\n[{GetTimeStamp()}] Running Test with Linear Kernel: \n");
+            RunSingleTest(inputs, outputs, codebook, new Linear(), testSet);
+            Console.WriteLine($"\n[{GetTimeStamp()}] Running Test with Polynomial Kernel: \n");
+            RunSingleTest(inputs, outputs, codebook, new Polynomial(3), testSet);
+            Console.WriteLine($"\n[{GetTimeStamp()}] Running Test with Gaussian Kernel: \n");
+            RunSingleTest(inputs, outputs, codebook, new Gaussian(0.1), testSet);
+            Console.WriteLine($"\n[{GetTimeStamp()}] Running Test with Sigmoid Kernel: \n");
+            RunSingleTest(inputs, outputs, codebook, new Sigmoid(0.01, 0.01), testSet);
+        }
+
+        void RunSingleTest(int[][] inputs, int[] outputs, Codification codebook, KernelBase kernel, List<Record> testSet)
+        {
+            KernelSupportVectorMachine machine = new KernelSupportVectorMachine(kernel, inputs[0].Length);
+            SequentialMinimalOptimization m = new SequentialMinimalOptimization(machine, ToDoubles(inputs), Normalize(outputs));
+            m.Run();
+
+            SVMLearner learner = new SVMLearner(this, codebook, machine);
+
+            ConfusionMatrix testResults = RunTest(learner.Predict, testSet);
+            PrintResults(testResults);
+        }
+
+        int[] Normalize(int[] outputs)
+        {
+            for (int i = 0; i < outputs.Length; i++)
+                if (outputs[i] == 0)
+                    outputs[i] = -1;
+            return outputs;
+        }
+
+        double[][] ToDoubles(int[][] inputs)
+        {
+            double[][] result = new double[inputs.Length][];
+            for (int i = 0; i < result.Length; i++)
+                result[i] = ToDoubles(inputs[i]);
+            return result;
+        }
+
+        double[] ToDoubles(int[] inputs)
+        {
+            double[] result = new double[inputs.Length];
+            Array.Copy(inputs, result, result.Length);
+            return result;
+        }
+
+        void RunID3Test()
         {
             List<Record> trainingSet;
             List<Record> testSet;
@@ -26,14 +102,14 @@ namespace HW4
             }
         }
 
-        static void RunSingleTest(List<Record> trainingSet, ReferenceTable table, List<Record> testSet, int ensembleCount, int depth)
+        void RunSingleTest(List<Record> trainingSet, ReferenceTable table, List<Record> testSet, int ensembleCount, int depth)
         {
             Console.WriteLine($"\n[{GetTimeStamp()}] Runing test with Ensemble = {ensembleCount} and MaxDepth = {depth}\n");
             Ensemble ensemble = new Ensemble();
             Random picker = new Random();
             for (int i = 0; i < ensembleCount; i++)
             {
-                Learner learner = LoadDecisionTree(SampledData(trainingSet, picker), table, depth);
+                ID3Learner learner = LoadDecisionTree(SampledData(trainingSet, picker), table, depth);
                 ensemble.AddVoter(learner.Predict);
             }
 
@@ -41,7 +117,7 @@ namespace HW4
             PrintResults(testResults);
         }
 
-        static ReferenceTable BuildDataSets(out List<Record> trainingSet, out List<Record> testSet)
+        ReferenceTable BuildDataSets(out List<Record> trainingSet, out List<Record> testSet)
         {
             const string training = @"..\..\Resources\3.1\diabetes_train.txt";
             const string test = @"..\..\Resources\3.1\diabetes_test.txt";
@@ -58,7 +134,7 @@ namespace HW4
             return table;
         }
 
-        static void PrintResults(ConfusionMatrix matrix)
+        void PrintResults(ConfusionMatrix matrix)
         {
             var bias = ((double)matrix.FalseNegatives + matrix.FalsePositives) /
                        (matrix.TrueNegatives + matrix.TruePositives +
@@ -74,7 +150,7 @@ namespace HW4
                               $"{matrix}");
         }
 
-        static ConfusionMatrix RunTest(Func<Record, bool> predictor, List<Record> instances)
+        ConfusionMatrix RunTest(Func<Record, bool> predictor, List<Record> instances)
         {
             var truePositive = instances.Count(record => record.IsPositive && predictor(record));
             var trueNegative = instances.Count(record => !record.IsPositive && !predictor(record));
@@ -84,19 +160,11 @@ namespace HW4
             return new ConfusionMatrix(truePositive, falseNegative, falsePositive, trueNegative);
         }
 
-        public static Learner LoadDecisionTree(List<Record> trainingSet, ReferenceTable table, int depth)
+        ID3Learner LoadDecisionTree(List<Record> trainingSet, ReferenceTable table, int depth)
         {
-            DataTable data = new DataTable("Diabetes dataset");
-
-            data.Columns.AddRange(Array.ConvertAll(table.Columns, x => new DataColumn(x)));
-
-            foreach (var record in trainingSet)
-                data.Rows.Add(Array.ConvertAll(record.Values, x => x as object));
-
-            Codification codebook = new Codification(data, table.Columns);
-            DataTable symbols = codebook.Apply(data);
-            int[][] inputs = symbols.ToArray<int>(ExcludeLast(table.Columns));
-            int[] outputs = symbols.ToArray<int>(table.Columns.Last());
+            int[][] inputs;
+            int[] outputs;
+            var codebook = BuildCodebook(trainingSet, table, out inputs, out outputs);
 
             var attributes = new DecisionVariable[table.Columns.Length - 1];
             for (int i = 0; i < attributes.Length; i++)
@@ -109,10 +177,26 @@ namespace HW4
 
             id3Learning.Run(inputs, outputs);
 
-            return new Learner(tree, codebook, table.Columns.Last());
+            return new ID3Learner(this, tree, codebook, table.Columns.Last());
         }
 
-        static List<Record> SampledData(List<Record> trainingRecords, Random picker)
+        Codification BuildCodebook(List<Record> trainingSet, ReferenceTable table, out int[][] inputs, out int[] outputs)
+        {
+            DataTable data = new DataTable("Diabetes dataset");
+
+            data.Columns.AddRange(Array.ConvertAll(table.Columns, x => new DataColumn(x)));
+
+            foreach (var record in trainingSet)
+                data.Rows.Add(Array.ConvertAll(record.Values, x => x as object));
+
+            Codification codebook = new Codification(data, table.Columns);
+            DataTable symbols = codebook.Apply(data);
+            inputs = symbols.ToArray<int>(ExcludeLast(table.Columns));
+            outputs = symbols.ToArray<int>(table.Columns.Last());
+            return codebook;
+        }
+
+        List<Record> SampledData(List<Record> trainingRecords, Random picker)
         {
             List<Record> results = new List<Record>();
             while (results.Count < trainingRecords.Count)
@@ -123,16 +207,38 @@ namespace HW4
             return results;
         }
 
-        public class Learner
+        public class SVMLearner
         {
+            Program Parent { get; }
+
+            Codification Codebook { get; }
+            KernelSupportVectorMachine Machine { get; }
+
+            public SVMLearner(Program parent, Codification codebook, KernelSupportVectorMachine machine)
+            {
+                Parent = parent;
+                Machine = machine;
+                Codebook = codebook;
+            }
+
+            public bool Predict(Record instance)
+            {
+                int[] inputs = Codebook.Translate(Parent.ExcludeLast(instance.Values));
+                return Math.Sign(Machine.Compute(Parent.ToDoubles(inputs))) > 0;
+            }
+        }
+
+        public class ID3Learner
+        {
+            Program Parent { get; }
             DecisionTree Tree { get; }
             Codification Codebook { get; }
 
             String Label { get; }
 
-
-            public Learner(DecisionTree tree, Codification codebook, string label)
+            public ID3Learner(Program parent, DecisionTree tree, Codification codebook, string label)
             {
+                Parent = parent;
                 Tree = tree;
                 Codebook = codebook;
                 Label = label;
@@ -140,18 +246,18 @@ namespace HW4
 
             public bool Predict(Record instance)
             {
-                return Translate(instance, Tree, Codebook, Label);
+                return Parent.Translate(instance, Tree, Codebook, Label);
             }
         }
 
-        static string[] ExcludeLast(string[] columns)
+        string[] ExcludeLast(string[] columns)
         {
             var result = new string[columns.Length - 1];
             Array.Copy(columns, result, result.Length);
             return result;
         }
 
-        static bool Translate(Record instance, DecisionTree tree, Codification codebook, string label)
+        bool Translate(Record instance, DecisionTree tree, Codification codebook, string label)
         {
             int[] inputs = codebook.Translate(ExcludeLast(instance.Values));
             string answer = codebook.Translate(label, tree.Compute(inputs));
@@ -159,7 +265,7 @@ namespace HW4
         }
 
 
-        static string GetTimeStamp()
+        string GetTimeStamp()
         {
             return $"[{DateTime.Now.ToString("HH:mm:ss.fff")}]";
         }
