@@ -11,14 +11,14 @@ namespace HW4
         public List<Record> DiscretizeDataset(List<Record> dataset, ReferenceTable table)
         {
             int[] row = { 0 };
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
-            Discretize(table.HasUnknowns(0), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
+            Discretize(table.HasUnknowns(row[0]), rec => double.Parse(rec[row[0]]), (rec, val) => rec[row[0]] = val, table.GetRanges(row[0]), table.GetValues(row[0]), dataset); row[0]++;
 
             return dataset;
         }
@@ -34,12 +34,20 @@ namespace HW4
                 else
                 {
                     for (int i = 0; i < upperBounds.Length; i++)
-                        setter(instance, value < upperBounds[i] ? values[i] : values[i + 1]);
+                    {
+                        if (value < upperBounds[i])
+                        {
+                            setter(instance, values[i]);
+                            break;
+                        }
+
+                        setter(instance, values[i + 1]);
+                    }
                 }
             }
         }
 
-       public List<Record> ParseRecords(string[] lines)
+        public List<Record> ParseRecords(string[] lines)
         {
             var records = new List<Record>();
             foreach (var line in lines)

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http.Headers;
 using System.Xml;
+using Accord.MachineLearning.Bayes;
 using Accord.MachineLearning.DecisionTrees;
 using Accord.MachineLearning.VectorMachines;
 using Accord.MachineLearning.VectorMachines.Learning;
@@ -30,6 +31,32 @@ namespace HW4
 
             Program kernelSVM = new Program("Kernel SVM Diabetes Test");
             kernelSVM.RunSVMTest();
+
+            Program naiveBayes = new Program("Naive Bayes Diabetes Test");
+            naiveBayes.RunNBTest();
+        }
+
+        void RunNBTest()
+        {
+            List<Record> trainingSet;
+            List<Record> testSet;
+            var table = BuildDataSets(out trainingSet, out testSet);
+
+            int[][] inputs;
+            int[] outputs;
+            var codebook = BuildCodebook(trainingSet, table, out inputs, out outputs);
+
+            int[] symbolCounts = new int[codebook.Columns.Count - 1];
+            for (int i = 0; i < symbolCounts.Length; i++)
+                symbolCounts[i] = codebook[i].Symbols;
+            int classCount = codebook.Columns.Last().Symbols; // 2!
+
+            NaiveBayes target = new NaiveBayes(classCount, symbolCounts);
+            target.Estimate(inputs, outputs);
+            NBLearner learner = new NBLearner(this, target, codebook);
+
+            ConfusionMatrix testResults = RunTest(learner.Predict, testSet);
+            PrintResults(testResults);
         }
 
         void RunSVMTest()
@@ -186,10 +213,9 @@ namespace HW4
 
             data.Columns.AddRange(Array.ConvertAll(table.Columns, x => new DataColumn(x)));
 
-            foreach (var record in trainingSet)
-                data.Rows.Add(Array.ConvertAll(record.Values, x => x as object));
+            trainingSet.ForEach(each => data.Rows.Add(each.Values));
 
-            Codification codebook = new Codification(data, table.Columns);
+            Codification codebook = new Codification(data);
             DataTable symbols = codebook.Apply(data);
             inputs = symbols.ToArray<int>(ExcludeLast(table.Columns));
             outputs = symbols.ToArray<int>(table.Columns.Last());
@@ -205,6 +231,31 @@ namespace HW4
                 results.Add(trainingRecords[index]);
             }
             return results;
+        }
+
+        public class NBLearner
+        {
+            Program Parent { get; }
+
+            NaiveBayes Target { get; }
+
+            Codification Codebook { get; }
+
+            public NBLearner(Program parent, NaiveBayes target, Codification codebook)
+            {
+                Parent = parent;
+                Target = target;
+                Codebook = codebook;
+            }
+
+            public bool Predict(Record instance)
+            {
+                int[] inputs = Codebook.Translate(Parent.ExcludeLast(instance.Values));
+                int output = Target.Compute(inputs);
+
+                string result = Codebook.Translate(Codebook.Columns.Last().ColumnName, output);
+                return result == "1";
+            }
         }
 
         public class SVMLearner
